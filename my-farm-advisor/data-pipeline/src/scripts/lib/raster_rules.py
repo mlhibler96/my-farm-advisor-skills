@@ -96,8 +96,11 @@ def coverage(tif_path: str | Path, geom_wgs84, *, nodata_extra: float | None = N
         geom = gpd.GeoSeries([geom_wgs84], crs="EPSG:4326").to_crs(ds.crs).iloc[0]
         in_field = geometry_mask([geom.__geo_interface__], out_shape=ds.shape,
                                  transform=ds.transform, invert=True)
-        arr = ds.read(1, masked=True)
-        filled = np.asarray(np.ma.filled(arr, np.nan), dtype="float64")
+        # Integer rasters (Sentinel-2 int16, Landsat uint16, NASADEM int16)
+        # cannot be filled with nan in place: np.ma.filled raises "Cannot
+        # convert fill_value nan to dtype int16". Promote to float64 first.
+        arr = ds.read(1, masked=True).astype("float64")
+        filled = np.asarray(np.ma.filled(arr, np.nan))
         valid = np.isfinite(filled)
         if nodata_extra is not None:
             valid &= filled != nodata_extra
@@ -106,14 +109,20 @@ def coverage(tif_path: str | Path, geom_wgs84, *, nodata_extra: float | None = N
             cell_area *= (111320.0 ** 2) * max(0.2, math.cos(math.radians(geom.centroid.y)))
         field_cells = int(in_field.sum())
         field_valid = int((in_field & valid).sum())
-        # margin actually present: field bounds vs raster bounds, in metres
-        gb = gpd.GeoSeries([geom]).bounds.iloc[0]
-        m_lat = (ds.bounds.top - gb[3]) if ds.bounds.top > gb[3] else 0.0
-        m_lon = (gb[2] - ds.bounds.left) if ds.bounds.left < gb[2] else 0.0
+        # margin actually present: field bounds vs raster bounds, in metres.
+        # Positional bounds, never gb[3]: pandas>=3 resolves integer keys as
+        # LABELS on a Series whose index is the column order -> KeyError: 3.
+        gminx, gminy, gmaxx, gmaxy = (float(v) for v in geom.bounds)
+        left_m = max(0.0, gminx - ds.bounds.left)
+        right_m = max(0.0, ds.bounds.right - gmaxx)
+        bottom_m = max(0.0, gminy - ds.bounds.bottom)
+        top_m = max(0.0, ds.bounds.top - gmaxy)
         if ds.crs.is_geographic:
-            m = max(m_lat, m_lon) * 111320.0
+            m_per_deg_lon = 111320.0 * max(0.2, math.cos(math.radians(geom.centroid.y)))
+            m = min(left_m * m_per_deg_lon, right_m * m_per_deg_lon,
+                    bottom_m * 111320.0, top_m * 111320.0)
         else:
-            m = max(m_lat, m_lon)
+            m = min(left_m, right_m, bottom_m, top_m)
         return {
             "field_area_m2": float(geom.area if not ds.crs.is_geographic else field_cells * cell_area),
             "field_cell_count": field_cells,

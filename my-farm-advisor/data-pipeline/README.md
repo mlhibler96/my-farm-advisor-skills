@@ -25,6 +25,28 @@ runtime artifacts stay outside the repo under `DATA_PIPELINE_DATA_ROOT`
 (see `ASSET_POLICY.md` at the repo root).
 
 
+## Grower web map
+
+The pipeline writes canonical field boundaries, and the grower web map turns
+them into one lightweight interactive HTML file per grower: every farm and field
+on an online satellite basemap (Esri World Imagery, OSM alternative), with zoom,
+a searchable field list, and a click popup carrying grower, farm, and field
+metadata plus soil and 2021–2025 crop history when those tables exist. Only
+polygons and metadata are embedded — no rasters or posters — so a three-field
+grower is roughly 25 KB. See the
+[grower web map guide](grower-web-map/GUIDE.md).
+
+```bash
+export DATA_PIPELINE_DATA_ROOT=/absolute/path/to/my-farm-advisor-runtime
+cd "${DATA_PIPELINE_DATA_ROOT}/data-pipeline/src"
+"${DATA_PIPELINE_DATA_ROOT}/data-pipeline/.venv/bin/python" \
+  scripts/reporting/generate_grower_webmap.py --grower-slug <grower-slug>
+```
+
+Output: `growers/<grower>/derived/reports/<grower>_webmap.html` (runtime data,
+not committed). The generator is installed with the rest of the runtime source
+by `./scripts/install.sh`.
+
 ## Global parity in one paragraph
 
 Any field, any country, **zero accounts**: boundaries from CSB (US) or

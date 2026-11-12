@@ -10,7 +10,7 @@ Edits should stay in this folder and its children unless the user explicitly ask
 
 ## Read nearby docs first
 
-Read `README.md` first. Review `scripts/install.sh`, `src/scripts/bootstrap_runtime.py`, and `src/scripts/run_farm_pipeline.py` before changing runtime or pipeline behavior. Read `../data-sources/INDEX.md` for related rebuild and reporting workflows.
+Read `README.md` first. Review `scripts/install.sh`, `src/scripts/bootstrap_runtime.py`, and `src/scripts/run_farm_pipeline.py` before changing runtime or pipeline behavior. Read `../data-sources/INDEX.md` for related rebuild and reporting workflows. For the grower-level interactive map, read `grower-web-map/GUIDE.md`.
 
 ## Runtime contract
 
@@ -183,6 +183,20 @@ Root repository validation after documentation or structure changes:
 cd ../..
 ./scripts/validate.sh
 ```
+
+Build an interactive grower web map from the boundaries a pipeline run already
+wrote. The generator is part of the runtime source tree, so `install.sh`
+installs it; the output stays in runtime storage:
+
+```bash
+export DATA_PIPELINE_DATA_ROOT=/absolute/path/to/my-farm-advisor-runtime
+cd "${DATA_PIPELINE_DATA_ROOT}/data-pipeline/src"
+"${DATA_PIPELINE_DATA_ROOT}/data-pipeline/.venv/bin/python" \
+  scripts/reporting/generate_grower_webmap.py --grower-slug <grower-slug>
+```
+
+See [grower-web-map/GUIDE.md](grower-web-map/GUIDE.md) for inputs, map
+behaviour, the size budget, and the review checklist.
 
 ## Local workflow notes
 
