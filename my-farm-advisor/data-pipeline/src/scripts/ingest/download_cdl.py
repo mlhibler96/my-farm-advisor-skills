@@ -259,7 +259,10 @@ def main():
     if not us_fields.empty:
         print("State CDL coverage:", ", ".join(state_fips_values))
 
-    target_years = _target_cdl_years()
+    # An explicit --cdl-years list wins over the publication-lag default, so a
+    # farm can pin its CDL window to the imagery window it actually analyses
+    # (e.g. 2021-2025) instead of stopping at the last program-published year.
+    target_years = _parse_years(args.cdl_years) or _target_cdl_years()
     cached_years = [
         year
         for year in target_years
