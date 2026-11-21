@@ -47,7 +47,9 @@ Open the subtree index that matches the request:
   (decision table in `soil/soil-routing.md`; verified endpoints in
   [references/non-us-soil-sources.md](references/non-us-soil-sources.md)). No silent cross-border fills.
 - Use **Terrain** for DEM source policy, elevation provenance, and terrain derivatives.
-- Use **EDA** for exploration, comparisons, correlations, visualization, and time series.
+- Use **EDA** for exploration, comparisons, correlations, visualization, and time series; for a
+  whole-farm pass over boundaries, CDL, and weather, start at
+  [eda-field](eda/eda-field/GUIDE.md).
 - Use **Data Sources** for canonical data rebuilds and farm-level intelligence reporting.
 - Use **Strategy** for maturity planning and crop-strategy decisions.
 - Use **Weather** for NASA POWER weather acquisition and downstream farm weather analysis.
