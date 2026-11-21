@@ -37,6 +37,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.transforms import Bbox
 import pandas as pd
 from scipy import stats
 
@@ -296,8 +297,11 @@ def plot_boundary_area_ratio(metrics: pd.DataFrame, png: Path, csv: Path) -> Non
     ax.axvline(100, color="#111827", linewidth=1.2, linestyle="--")
     ax.set_yticks(y)
     ax.set_yticklabels(data["field_id"], fontsize=8)
+    right_edge = float(data["ratio_to_name_pct"].max())
     for yi, (_, row) in zip(y, data.iterrows()):
-        offset = 9 if row["ratio_to_name_pct"] >= 100 else -9
+        # Put the value on the roomier side; a white pad keeps it legible over
+        # the stem line and clear of long field names on the left.
+        offset = -9 if row["ratio_to_name_pct"] > right_edge - 6 else 9
         ax.annotate(
             f"{row['ratio_to_name_pct']:.0f}%",
             (row["ratio_to_name_pct"], yi),
@@ -307,7 +311,9 @@ def plot_boundary_area_ratio(metrics: pd.DataFrame, png: Path, csv: Path) -> Non
             ha="left" if offset > 0 else "right",
             fontsize=7.5,
             color="#333333",
+            bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.85),
         )
+    ax.set_xlim(float(data["ratio_to_name_pct"].min()) - 6, right_edge + 4)
     ax.set_xlabel("Measured area as % of the acreage token in the field name")
     ax.set_title("Boundary area vs field name\n(red = more than 15 % off the name)", fontsize=10.5)
     ax.grid(True, axis="x", color="#e6e6e6", linewidth=0.6)
@@ -320,7 +326,7 @@ def plot_boundary_area_ratio(metrics: pd.DataFrame, png: Path, csv: Path) -> Non
 
 def plot_boundary_shape(metrics: pd.DataFrame, png: Path, csv: Path) -> None:
     """Story: fragmented or sliver-shaped fields distort any pixel statistic."""
-    data = metrics.copy()
+    data = metrics.sort_values(["part_count", "compactness"]).reset_index(drop=True)
     _write_csv(data, csv)
     fig, ax = plt.subplots(figsize=(8.4, 5.2), dpi=150)
     # Bubble AREA carries acreage, but the range is compressed: raw acres make
@@ -328,6 +334,7 @@ def plot_boundary_shape(metrics: pd.DataFrame, png: Path, csv: Path) -> None:
     span = float(data["area_acres"].max() - data["area_acres"].min()) or 1.0
     sizes = 45 + 110 * (data["area_acres"] - data["area_acres"].min()) / span
     jitter = np.linspace(-0.12, 0.12, len(data))
+    column_rank = data.groupby("part_count").cumcount().to_numpy()
     ax.scatter(
         data["part_count"] + jitter,
         data["compactness"],
@@ -338,16 +345,47 @@ def plot_boundary_shape(metrics: pd.DataFrame, png: Path, csv: Path) -> None:
         alpha=0.9,
         zorder=3,
     )
-    for (_, row), dx in zip(data.iterrows(), jitter):
-        ax.annotate(
-            row["field_id"],
-            (row["part_count"] + dx, row["compactness"]),
-            xytext=(10, 7),
-            textcoords="offset points",
-            fontsize=7.2,
-            color="#222222",
-            bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.8),
-        )
+    # Place labels greedily: try eight corners, keep the first box that stays
+    # inside the axes and clears every marker and earlier label. Two fields can
+    # sit within a hundredth of each other, so a fixed offset is not enough.
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    point_px = fig.dpi / 72.0
+    occupied = []
+    for x, y, size in zip(data["part_count"] + jitter, data["compactness"], sizes):
+        px, py = ax.transData.transform((x, y))
+        radius = (np.sqrt(size) / 2 + 2) * point_px
+        occupied.append(Bbox.from_extents(px - radius, py - radius, px + radius, py + radius))
+    axes_box = ax.get_window_extent(renderer)
+    candidates = [(9, 7), (9, -12), (-9, 7), (-9, -12),
+                  (9, 20), (-9, 20), (9, -25), (-9, -25)]
+    fallback = [(10, 7), (10, -12), (-10, 7), (-10, -12)]
+    for (_, row), dx, rank in zip(data.iterrows(), jitter, column_rank):
+        anchor = (row["part_count"] + dx, row["compactness"])
+        placed = False
+        for ox, oy in candidates:
+            text = ax.annotate(
+                row["field_id"], anchor, xytext=(ox, oy), textcoords="offset points",
+                ha="left" if ox > 0 else "right", va="center",
+                fontsize=7.2, color="#222222", zorder=4,
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.85),
+            )
+            box = text.get_window_extent(renderer)
+            inside = (axes_box.x0 <= box.x0 and box.x1 <= axes_box.x1
+                      and axes_box.y0 <= box.y0 and box.y1 <= axes_box.y1)
+            if inside and not any(box.overlaps(other) for other in occupied):
+                occupied.append(box)
+                placed = True
+                break
+            text.remove()
+        if not placed:
+            ox, oy = fallback[int(rank) % len(fallback)]
+            ax.annotate(
+                row["field_id"], anchor, xytext=(ox, oy), textcoords="offset points",
+                ha="left" if ox > 0 else "right", va="center",
+                fontsize=7.2, color="#222222", zorder=4,
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.85),
+            )
     ax.set_xlabel("Polygon part count (1 = single boundary)")
     ax.set_ylabel("Polsby–Popper compactness (1.0 = circle)")
     ax.set_xticks(sorted(data["part_count"].unique()))
@@ -364,7 +402,7 @@ def plot_boundary_shape(metrics: pd.DataFrame, png: Path, csv: Path) -> None:
                        markerfacecolor=_crop_color(c), markeredgecolor="#1f1f1f", label=c)
             for c in crops
         ],
-        loc="lower right", fontsize=7.5, frameon=False, title="2026 crop", title_fontsize=7.5,
+        loc="upper right", fontsize=7.5, frameon=False, title="2026 crop", title_fontsize=7.5,
     )
     fig.tight_layout()
     _save(fig, png)
@@ -393,13 +431,13 @@ def plot_boundary_adjacency(pairs: pd.DataFrame, png: Path, csv: Path) -> None:
         for j in range(len(ids)):
             if np.isnan(matrix[i, j]):
                 continue
-            if matrix[i, j] <= 250:
+            if matrix[i, j] < 600:
                 ax.text(j, i, f"{matrix[i, j]:.0f}", ha="center", va="center",
-                        fontsize=6.4, color="white" if matrix[i, j] < 150 else "#1f1f1f")
+                        fontsize=6.0, color="white" if matrix[i, j] < 150 else "#1f1f1f")
     colorbar = fig.colorbar(image, ax=ax, pad=0.02, fraction=0.046)
     colorbar.set_label("Edge-to-edge gap (m; ≥600 shown pale)", fontsize=7.5)
     colorbar.ax.tick_params(labelsize=7)
-    ax.set_title("Field separation\n(labelled cells are within 250 m)", fontsize=9.5)
+    ax.set_title("Field separation\n(numbers = gap in metres)", fontsize=9.5)
     ax.set_xlabel("field", fontsize=8)
     ax.set_ylabel("field", fontsize=8)
     ax.set_aspect("equal")
