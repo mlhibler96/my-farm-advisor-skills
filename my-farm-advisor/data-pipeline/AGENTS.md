@@ -96,6 +96,28 @@ cd "${DATA_PIPELINE_DATA_ROOT}/data-pipeline/src"
   --weather-time-standard lst
 ```
 
+Derive boundaries from operations-center exports (planting/harvest point shapefiles
+inside a `.zip`). These carry points and a swath width, not an outline, so run the
+derivation before the normal pipeline. `--dry-run` plans without writing:
+
+```bash
+export DATA_PIPELINE_DATA_ROOT=/absolute/path/to/my-farm-advisor-runtime
+cd "${DATA_PIPELINE_DATA_ROOT}/data-pipeline/src"
+"${DATA_PIPELINE_DATA_ROOT}/data-pipeline/.venv/bin/python" \
+  scripts/ingest/derive_fields_from_as_applied.py \
+  --grower-slug <grower-slug> --farm-slug <farm-slug> --farm-name "<Farm Name>" \
+  --shp-dir "${DATA_PIPELINE_DATA_ROOT}/data-pipeline/growers/<grower>/incoming/<batch>" \
+  --state-fips 29
+```
+
+Method: half the documented `Swth_Wdth_` buffer union, close 3 m, simplify 0.75 m,
+fragments under 0.5 ac dropped. It writes `boundary/field_boundaries.geojson`,
+appends `manifests/field-inventory.csv`, and merges the fields into
+`manifests/<source>_derived_fields_provenance.json` (sha256, point counts,
+points/closed/final acres, overlap audit). Replacing an existing field with a >2 %
+area change requires `--force`. Offline check:
+`scripts/tests/smoke_derive_fields.py`.
+
 Initialize shared geoadmin, maturity, weather, and CDL assets without seeding a farm:
 
 ```bash
