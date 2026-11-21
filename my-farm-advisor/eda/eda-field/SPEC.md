@@ -21,6 +21,9 @@ field_eda.py
 - Exit 0 on success. Missing inputs exit non-zero with the missing paths named.
 - A category with no usable input is reported as a guard, not a crash (e.g. an
   empty CDL table).
+- Planted crops are matched by `field_slug`. When a manifest entry has no slug,
+  the loader falls back to a unique normalized `field_name` match against the
+  boundary table; only then does the field become `no_planted_record`.
 
 ## Artifacts
 

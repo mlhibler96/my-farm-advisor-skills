@@ -141,6 +141,11 @@ def resolve_inputs(
     return {key: Path(value) for key, value in resolved.items() if value is not None and Path(value).exists()}
 
 
+def _normalise_name(value: str) -> str:
+    """Match manifest names to boundaries: lowercase, non-alphanumerics -> '-'."""
+    return re.sub(r"[^a-z0-9]+", "-", str(value).lower()).strip("-")
+
+
 def load_dataset(paths: dict[str, Path], *, grower_slug: str = "", farm_slug: str = "") -> Dataset:
     boundaries = gpd.read_file(paths["boundaries"])
     weather = pd.read_csv(paths["weather"])
@@ -149,11 +154,31 @@ def load_dataset(paths: dict[str, Path], *, grower_slug: str = "", farm_slug: st
     manifest = paths.get("planted")
     if manifest and manifest.exists():
         doc = json.loads(manifest.read_text(encoding="utf-8"))
+        boundary_ids = {str(value) for value in boundaries.get("field_id", [])}
+        # Some provenance manifests carry a crop but no field_slug (older
+        # derive passes). Fall back to the field name, which is what both
+        # sides share, and only when it matches exactly one boundary.
+        name_lookup: dict[str, str] = {}
+        if "field_name" in boundaries.columns:
+            counts: dict[str, list[str]] = {}
+            for field_id, field_name in zip(boundaries["field_id"], boundaries["field_name"]):
+                counts.setdefault(_normalise_name(field_name), []).append(str(field_id))
+            name_lookup = {key: ids[0] for key, ids in counts.items() if len(ids) == 1}
+        priority: dict[str, int] = {}
         for entry in doc.get("fields", []):
-            slug = entry.get("field_slug")
             crop = entry.get("crop")
-            if slug and crop:
-                planted[str(slug)] = str(crop)
+            slug = entry.get("field_slug")
+            if not slug or str(slug) not in boundary_ids:
+                slug = name_lookup.get(_normalise_name(entry.get("field_name", "")))
+            if not slug or not crop:
+                continue
+            # If both a planting and a harvest record exist for one year, the
+            # planting record wins; otherwise the entry order decides.
+            rank = 2 if str(entry.get("operation", "")).lower() == "planting" else 1
+            key = str(slug)
+            if key not in planted or rank >= priority.get(key, 0):
+                planted[key] = str(crop)
+                priority[key] = rank
     return Dataset(
         boundaries=boundaries,
         weather=weather,

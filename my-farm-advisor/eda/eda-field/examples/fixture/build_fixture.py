@@ -191,10 +191,15 @@ def _code(crop: str) -> int:
 
 def build_planted(boundaries: gpd.GeoDataFrame) -> dict:
     entries = []
-    for field_id, (_sequence, planted) in SEQUENCES.items():
-        if field_id not in set(boundaries["field_id"]):
-            continue
-        entries.append({"field_slug": field_id, "field_name": field_id.upper(), "crop": planted})
+    for _, row in boundaries.iterrows():
+        field_id = str(row["field_id"])
+        entries.append(
+            {
+                "field_slug": field_id,
+                "field_name": str(row["field_name"]),
+                "crop": SEQUENCES[field_id][1],
+            }
+        )
     return {"fields": entries, "note": "synthetic fixture planting record"}
 
 

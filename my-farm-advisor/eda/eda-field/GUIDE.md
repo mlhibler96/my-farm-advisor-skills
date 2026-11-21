@@ -56,7 +56,9 @@ Expected columns:
 
 - weather: `field_id, lat, lon, date, T2M, T2M_MAX, T2M_MIN, PRECTOTCORR, ...`
 - CDL: `field_id, year, crop_code, crop_name, pixel_count, pct, crop_source`
-- planted manifest: `fields[].field_slug`, `fields[].crop`
+- planted manifest: `fields[].field_slug` and `fields[].crop`; when an entry
+  has no slug, the loader falls back to `fields[].field_name` matched against
+  the boundary name (unique matches only)
 
 An explicit `--boundaries`, `--weather`, `--cdl`, or `--planted` overrides the
 default for that input, which is how the fixture runs.

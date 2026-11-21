@@ -75,6 +75,23 @@ def check_nominal(module) -> None:
             raise SmokeFailure(f"nominal acres for {name!r}: expected {expected}, got {actual}")
 
 
+def check_name_fallback(module, root: Path) -> None:
+    """A manifest entry without field_slug must still match by field name."""
+    doc = json.loads((root / "planted.json").read_text(encoding="utf-8"))
+    for entry in doc["fields"]:
+        entry.pop("field_slug", None)
+    manifest = root / "planted_name_only.json"
+    manifest.write_text(json.dumps(doc), encoding="utf-8")
+
+    paths = _paths(root)
+    paths["planted"] = manifest
+    ds = module.load_dataset(paths, grower_slug="fx-grower", farm_slug="fx-farm")
+    if len(ds.planted) != 6:
+        raise SmokeFailure(f"name fallback should recover 6 crops, got {len(ds.planted)}")
+    if ds.planted.get("fx-01") != "Soybeans":
+        raise SmokeFailure(f"name fallback mapped fx-01 to {ds.planted.get('fx-01')!r}")
+
+
 def check_boundaries(module, root: Path, out: Path) -> dict:
     ds = module.load_dataset(_paths(root), grower_slug="fx-grower", farm_slug="fx-farm")
     summary = module.run_boundaries(ds, out)
@@ -202,6 +219,7 @@ def main() -> int:
         _build_fixture(root)
         _build_fixture(other, temp_offset=1.4)
 
+        check_name_fallback(module, root)
         check_boundaries(module, root, out)
         check_cdl(module, root, out)
         check_weather(module, root, out)
