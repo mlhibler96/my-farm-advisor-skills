@@ -33,7 +33,7 @@ Every figure has a same-stem CSV. A caller should quote the CSV, not the PNG.
 |---|---|---|
 | `boundaries_area_ratio` | area vs name token, one row per field | `field_id, field_name, crop, area_acres, area_acres_geometric, perimeter_m, compactness, convex_hull_ratio, part_count, nominal_acres, ratio_to_name_pct` |
 | `boundaries_shape` | compactness vs part count | same metrics table as above |
-| `boundaries_adjacency` | gap matrix | `field_a, field_b, shared_edge_m, gap_m, overlap_acres` |
+| `boundaries_adjacency` | closest field pairs (≤250 m) as a lollipop; the full gap matrix stays in the CSV | `field_a, field_b, shared_edge_m, gap_m, overlap_acres` |
 | `boundaries_portfolio_map` | framed portfolio map | `map_number, field_id, crop, area_acres, framed_x_m, framed_y_m` |
 | `cdl_crop_matrix` | field × year dominant class | `field_id, year, dominant_crop, dominant_pct` |
 | `cdl_purity` | dominant share per field-year | `field_id, year, dominant_crop, dominant_pct` |

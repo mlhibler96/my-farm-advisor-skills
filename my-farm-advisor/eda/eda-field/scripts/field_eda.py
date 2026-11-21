@@ -37,7 +37,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.transforms import Bbox
+from matplotlib.transforms import Bbox, offset_copy
 import pandas as pd
 from scipy import stats
 
@@ -353,13 +353,12 @@ def plot_boundary_shape(metrics: pd.DataFrame, png: Path, csv: Path) -> None:
     """Story: fragmented or sliver-shaped fields distort any pixel statistic."""
     data = metrics.sort_values(["part_count", "compactness"]).reset_index(drop=True)
     _write_csv(data, csv)
-    fig, ax = plt.subplots(figsize=(8.4, 5.2), dpi=150)
+    fig, ax = plt.subplots(figsize=(8.6, 6.0), dpi=150)
     # Bubble AREA carries acreage, but the range is compressed: raw acres make
     # 150 ac blobs that swallow the panel and hide the label positions.
     span = float(data["area_acres"].max() - data["area_acres"].min()) or 1.0
     sizes = 45 + 110 * (data["area_acres"] - data["area_acres"].min()) / span
     jitter = np.linspace(-0.12, 0.12, len(data))
-    column_rank = data.groupby("part_count").cumcount().to_numpy()
     ax.scatter(
         data["part_count"] + jitter,
         data["compactness"],
@@ -382,35 +381,55 @@ def plot_boundary_shape(metrics: pd.DataFrame, png: Path, csv: Path) -> None:
         radius = (np.sqrt(size) / 2 + 2) * point_px
         occupied.append(Bbox.from_extents(px - radius, py - radius, px + radius, py + radius))
     axes_box = ax.get_window_extent(renderer)
-    candidates = [(9, 7), (9, -12), (-9, 7), (-9, -12),
-                  (9, 20), (-9, 20), (9, -25), (-9, -25)]
-    fallback = [(10, 7), (10, -12), (-10, 7), (-10, -12)]
-    for (_, row), dx, rank in zip(data.iterrows(), jitter, column_rank):
+    # A spiral of offsets, nearest ring first. Forty fields put several markers
+    # within a few pixels of each other, so a fixed eight-corner list runs out
+    # of valid slots; longer offsets carry a hairline leader back to the dot.
+    candidates = []
+    for radius in (9, 17, 25, 34, 44):
+        for angle in np.linspace(np.pi / 2, np.pi / 2 + 2 * np.pi, 8, endpoint=False):
+            candidates.append((radius * np.cos(angle), radius * np.sin(angle)))
+
+    def _overlap_area(left: Bbox, right: Bbox) -> float:
+        width = min(left.x1, right.x1) - max(left.x0, right.x0)
+        height = min(left.y1, right.y1) - max(left.y0, right.y0)
+        return width * height if width > 0 and height > 0 else 0.0
+
+    for (_, row), dx in zip(data.iterrows(), jitter):
         anchor = (row["part_count"] + dx, row["compactness"])
-        placed = False
+        best = None
         for ox, oy in candidates:
             text = ax.annotate(
                 row["field_id"], anchor, xytext=(ox, oy), textcoords="offset points",
                 ha="left" if ox > 0 else "right", va="center",
-                fontsize=7.2, color="#222222", zorder=4,
-                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.85),
+                fontsize=6.9, color="#222222", zorder=4,
+                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.88),
+                arrowprops=(
+                    dict(arrowstyle="-", color="#9ca3af", lw=0.6, shrinkA=1, shrinkB=4)
+                    if abs(ox) > 13 or abs(oy) > 13 else None
+                ),
             )
             box = text.get_window_extent(renderer)
             inside = (axes_box.x0 <= box.x0 and box.x1 <= axes_box.x1
                       and axes_box.y0 <= box.y0 and box.y1 <= axes_box.y1)
-            if inside and not any(box.overlaps(other) for other in occupied):
+            if not inside:
+                text.remove()
+                continue
+            overlap = sum(_overlap_area(box, other) for other in occupied)
+            if overlap == 0:
+                if best is not None:
+                    best[3].remove()
+                    best = None
                 occupied.append(box)
-                placed = True
                 break
-            text.remove()
-        if not placed:
-            ox, oy = fallback[int(rank) % len(fallback)]
-            ax.annotate(
-                row["field_id"], anchor, xytext=(ox, oy), textcoords="offset points",
-                ha="left" if ox > 0 else "right", va="center",
-                fontsize=7.2, color="#222222", zorder=4,
-                bbox=dict(boxstyle="round,pad=0.15", fc="white", ec="none", alpha=0.85),
-            )
+            if best is None or overlap < best[0]:
+                if best is not None:
+                    best[3].remove()
+                best = (overlap, ox, oy, text)
+            else:
+                text.remove()
+        if best is not None:
+            # No collision-free slot exists; keep the least-bad label.
+            occupied.append(best[3].get_window_extent(renderer))
     ax.set_xlabel("Polygon part count (1 = single boundary)")
     ax.set_ylabel("Polsby–Popper compactness (1.0 = circle)")
     ax.set_xticks(sorted(data["part_count"].unique()))
@@ -434,100 +453,317 @@ def plot_boundary_shape(metrics: pd.DataFrame, png: Path, csv: Path) -> None:
 
 
 def plot_boundary_adjacency(pairs: pd.DataFrame, png: Path, csv: Path) -> None:
-    """Story: are these independent fields or one contiguous block?"""
-    _write_csv(pairs, csv)
-    ids = sorted(set(pairs["field_a"]) | set(pairs["field_b"]))
-    index = {field_id: i for i, field_id in enumerate(ids)}
-    matrix = np.full((len(ids), len(ids)), np.nan)
-    for _, row in pairs.iterrows():
-        i, j = index[row["field_a"]], index[row["field_b"]]
-        matrix[i, j] = matrix[j, i] = row["gap_m"]
+    """Story: are these independent fields or one contiguous block?
 
-    fig, ax = plt.subplots(figsize=(3.4 + 0.5 * len(ids), 3.2 + 0.44 * len(ids)), dpi=150)
-    clipped = np.clip(matrix, 0, 600)
-    cmap = plt.get_cmap("YlOrRd_r").copy()
-    cmap.set_bad("#d9d9d9")  # self-pairs are not a gap
-    image = ax.imshow(np.ma.masked_invalid(clipped), cmap=cmap, vmin=0, vmax=600)
-    ax.set_xticks(range(len(ids)))
-    ax.set_yticks(range(len(ids)))
-    ax.set_xticklabels(ids, rotation=90, fontsize=7)
-    ax.set_yticklabels(ids, fontsize=7)
-    for i in range(len(ids)):
-        for j in range(len(ids)):
-            if np.isnan(matrix[i, j]):
-                continue
-            if matrix[i, j] < 600:
-                ax.text(j, i, f"{matrix[i, j]:.0f}", ha="center", va="center",
-                        fontsize=6.0, color="white" if matrix[i, j] < 150 else "#1f1f1f")
-    colorbar = fig.colorbar(image, ax=ax, pad=0.02, fraction=0.046)
-    colorbar.set_label("Edge-to-edge gap (m; ≥600 shown pale)", fontsize=7.5)
-    colorbar.ax.tick_params(labelsize=7)
-    ax.set_title("Field separation\n(numbers = gap in metres)", fontsize=9.5)
-    ax.set_xlabel("field", fontsize=8)
-    ax.set_ylabel("field", fontsize=8)
-    ax.set_aspect("equal")
+    A full 40-field matrix is unreadable once the report scales it to page
+    width, so the figure keeps the pair-level detail that actually decides the
+    question — every pair within 250 m — and leaves the complete gap matrix in
+    the CSV. Touch pairs get their shared-edge length printed next to the gap.
+    """
+    _write_csv(pairs, csv)
+    threshold = 250.0
+    near = pairs.loc[pairs["gap_m"] <= threshold].sort_values(
+        ["gap_m", "shared_edge_m"], ascending=[True, False]
+    )
+    if near.empty:
+        near = pairs.nsmallest(min(25, len(pairs)), "gap_m").sort_values("gap_m")
+
+    labels = [f"{a}  ↔  {b}" for a, b in zip(near["field_a"], near["field_b"])]
+    gaps = near["gap_m"].to_numpy(dtype=float)
+    touches = near["shared_edge_m"].to_numpy(dtype=float) > 0
+    colours = ["#b42318" if touch else "#6b7280" for touch in touches]
+    y = np.arange(len(near))
+
+    fig, ax = plt.subplots(figsize=(8.0, 0.27 * len(near) + 2.0), dpi=150)
+    ax.hlines(y, 0, gaps, color=colours, linewidth=2.2, zorder=2)
+    ax.scatter(gaps, y, s=34, color=colours, edgecolor="#1f1f1f", linewidth=0.6, zorder=3)
+    for yi, gap, touch, shared in zip(y, gaps, touches, near["shared_edge_m"]):
+        suffix = f"  ·  {shared:.1f} m shared edge" if touch else ""
+        ax.text(gap + 0.012 * max(gaps.max(), 10.0), yi, f"{gap:.1f} m{suffix}",
+                va="center", ha="left", fontsize=6.8,
+                color="#b42318" if touch else "#374151", zorder=4)
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels, fontsize=7.0)
+    ax.set_ylim(len(near) - 0.5, -0.5)
+    ax.set_xlim(0, max(gaps.max(), 10.0) * 1.32)
+    ax.set_xlabel("Edge-to-edge gap between derived polygons (m)", fontsize=8.5)
+    ax.set_title(
+        f"Closest field pairs — {len(near)} of {len(pairs)} are within {threshold:.0f} m",
+        fontsize=10.5,
+    )
+    ax.grid(True, axis="x", color="#ececec", linewidth=0.6)
+    ax.set_axisbelow(True)
+    for side in ("top", "right"):
+        ax.spines[side].set_visible(False)
+    touched = int(touches.sum())
+    within_50 = int((pairs["gap_m"] < 50).sum())
+    ax.text(
+        0.99, 0.99,
+        f"{touched} pairs share a boundary\n{within_50} pairs are under 50 m apart\n"
+        f"{len(pairs) - len(near)} pairs are farther than {threshold:.0f} m",
+        transform=ax.transAxes, ha="right", va="top", fontsize=7.2, color="#374151",
+        bbox=dict(boxstyle="round,pad=0.35", fc="#f8f7f3", ec="#d7d4cb", lw=0.7),
+    )
     fig.tight_layout()
     _save(fig, png)
 
 
+def _largest_field_cluster(geoms: list, max_gap_m: float = 1000.0) -> list[int]:
+    """Indices of the largest group whose members sit within ``max_gap_m``."""
+    count = len(geoms)
+    parent = list(range(count))
+
+    def find(index: int) -> int:
+        while parent[index] != index:
+            parent[index] = parent[parent[index]]
+            index = parent[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    for i in range(count):
+        for j in range(i + 1, count):
+            if geoms[i].distance(geoms[j]) <= max_gap_m:
+                union(i, j)
+
+    groups: dict[int, list[int]] = {}
+    for index in range(count):
+        groups.setdefault(find(index), []).append(index)
+    return max(groups.values(), key=len)
+
+
+def _fill_field_polygons(ax, geometry, crops, *, alpha: float = 0.65, linewidth: float = 0.9) -> None:
+    for geom, crop in zip(geometry, crops):
+        for part in _parts(geom):
+            x, y = part.exterior.xy
+            ax.fill(x, y, color=_crop_color(crop), alpha=alpha,
+                    edgecolor="#1f1f1f", linewidth=linewidth, zorder=2)
+
+
+def _number_fields(ax, geometry, orders, *, size: float, fontsize: float,
+                   rings: tuple[float, ...] = (10.0, 16.0, 22.0)) -> None:
+    # Number every part, so a split parcel does not look like an unlabelled
+    # extra field. Point markers stay a fixed screen size: data-unit circles
+    # swallow small parcels once the portfolio spans tens of kilometres.
+    #
+    # Adjacent fields put their representative points a handful of pixels
+    # apart, so a centred number lands on top of its neighbour. Try a small
+    # offset ring and keep the first slot that clears every earlier number;
+    # a moved number gets a hairline leader back to its marker. The caller
+    # sizes the ring: on the wide overview a large point offset is kilometres
+    # of geography, while on the detail panel it is only tens of metres.
+    fig = ax.figure
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    axes_box = ax.get_window_extent(renderer)
+    occupied = []
+    offsets = [(0.0, 0.0)]
+    for radius in rings:
+        for angle in np.linspace(np.pi / 2, np.pi / 2 + 2 * np.pi, 8, endpoint=False):
+            offsets.append((radius * np.cos(angle), radius * np.sin(angle)))
+
+    def _overlap_area(left: Bbox, right: Bbox) -> float:
+        width = min(left.x1, right.x1) - max(left.x0, right.x0)
+        height = min(left.y1, right.y1) - max(left.y0, right.y0)
+        return width * height if width > 0 and height > 0 else 0.0
+
+    for order, geom in zip(orders, geometry):
+        for part in _parts(geom):
+            point = part.representative_point()
+            ax.scatter([point.x], [point.y], s=size, facecolor="white",
+                       edgecolor="#111827", linewidth=0.9, zorder=5)
+            best = None
+            for ox, oy in offsets:
+                text = ax.annotate(
+                    str(order), (point.x, point.y), xytext=(ox, oy),
+                    textcoords="offset points", ha="center", va="center",
+                    fontsize=fontsize, fontweight="bold", zorder=6, clip_on=True,
+                    arrowprops=(
+                        dict(arrowstyle="-", color="#6b7280", lw=0.5,
+                             shrinkA=1, shrinkB=2)
+                        if (ox or oy) else None
+                    ),
+                )
+                box = text.get_window_extent(renderer)
+                inside = (axes_box.x0 <= box.x0 and box.x1 <= axes_box.x1
+                          and axes_box.y0 <= box.y0 and box.y1 <= axes_box.y1)
+                if not inside:
+                    text.remove()
+                    continue
+                overlap = sum(_overlap_area(box, other) for other in occupied)
+                if overlap == 0:
+                    if best is not None:
+                        best[1].remove()
+                        best = None
+                    occupied.append(box)
+                    break
+                if best is None or overlap < best[0]:
+                    if best is not None:
+                        best[1].remove()
+                    best = (overlap, text)
+                else:
+                    text.remove()
+            if best is not None:
+                # No collision-free slot: keep the least-bad label.
+                occupied.append(best[1].get_window_extent(renderer))
+
+
 def plot_portfolio_map(fields: gpd.GeoDataFrame, png: Path, csv: Path) -> None:
-    """Story: where the portfolio sits; the only spatial view in this subskill."""
+    """Story: where the portfolio sits; the only spatial view in this subskill.
+
+    A single overview stops working once forty fields span tens of kilometres:
+    the dense core collapses into overlapping markers. When the largest
+    connected cluster is a real subset of the portfolio, the figure adds a
+    detail panel for that cluster and a field key below it.
+    """
     frame_for, decorate, crs_note, view_extent = _field_frame_module()
     # force_rot=0.0: rotating a multi-field portfolio is meaningless, but the
     # frame contract still gives metre axes, a SW origin, and a true-north arrow.
     framed = frame_for(fields.to_crs("EPSG:4326"), panel_h_in=6.4, panel_w_in=9.4, force_rot=0.0)
     # Frame.geometry is the framed GeoDataFrame; its .geometry column keeps the
     # input row order, which is what the crop/ID zip below relies on.
-    geometry = framed.geometry.geometry
-    fig, ax = plt.subplots(figsize=(11.8, 6.4), dpi=150)
-    for geom, crop in zip(geometry, fields["crop_name"]):
-        for part in _parts(geom):
-            x, y = part.exterior.xy
-            ax.fill(x, y, color=_crop_color(crop), alpha=0.65, edgecolor="#1f1f1f", linewidth=1.0, zorder=2)
+    geometry = framed.geometry.geometry.reset_index(drop=True)
+    crops = fields["crop_name"].astype(str).reset_index(drop=True)
+    field_ids = fields["field_id"].astype(str).reset_index(drop=True)
+    acres = pd.to_numeric(fields["area_acres"], errors="coerce").reset_index(drop=True)
+    total_acres = float(acres.sum())
 
     bx0, by0, bx1, by1 = geometry.total_bounds  # (xmin, ymin, xmax, ymax)
     x_min, x_max, y_min, y_max = view_extent(bx0, bx1, by0, by1)
-    # A parcel can be too small to letter at this scale, so the map carries
-    # numbered markers and the key (outside the panel) carries the detail.
-    radius = 0.011 * max(x_max - x_min, y_max - y_min)
-    handles = []
-    for order, (geom, field_id, crop, acres) in enumerate(
-        zip(geometry, fields["field_id"], fields["crop_name"], fields["area_acres"]), start=1
-    ):
-        # Number every part, so a split parcel does not look like an
-        # unlabelled extra field.
-        for part in _parts(geom):
-            point = part.representative_point()
-            ax.add_patch(
-                plt.Circle((point.x, point.y), radius, facecolor="white",
-                           edgecolor="#111827", linewidth=1.0, zorder=5)
-            )
-            ax.text(point.x, point.y, str(order), ha="center", va="center",
-                    fontsize=7.0, fontweight="bold", zorder=6)
-        handles.append(
-            plt.Line2D(
-                [], [], marker="s", linestyle="", markersize=8,
-                markerfacecolor=_crop_color(crop), markeredgecolor="#111827",
-                label=f"{order} · {field_id}\n{float(acres):.1f} ac · {crop}",
-            )
-        )
 
+    handles = [
+        plt.Line2D(
+            [], [], marker="s", linestyle="", markersize=7,
+            markerfacecolor=_crop_color(crop), markeredgecolor="#111827",
+            label=f"{order}  {field_id}  {float(area):.1f} ac",
+        )
+        for order, (field_id, crop, area) in enumerate(zip(field_ids, crops, acres), start=1)
+    ]
+
+    cluster = _largest_field_cluster(list(geometry)) if len(geometry) >= 8 else []
+    cx0, cy0, cx1, cy1 = (
+        geometry.iloc[cluster].total_bounds if cluster else (bx0, by0, bx1, by1)
+    )
+    full_area = max((bx1 - bx0) * (by1 - by0), 1.0)
+    show_detail = (
+        len(cluster) >= 8
+        and len(cluster) <= 0.85 * len(geometry)
+        and (cx1 - cx0) * (cy1 - cy0) <= 0.55 * full_area
+    )
+
+    if not show_detail:
+        fig, ax = plt.subplots(figsize=(7.4, 4.9), dpi=150)
+        _fill_field_polygons(ax, geometry, crops)
+        ax.set_xlim(x_min, x_max)
+        ax.set_ylim(y_min, y_max)
+        ax.set_aspect("equal", adjustable="box")
+        decorate(ax, framed, callout=False)
+        _number_fields(ax, geometry, range(1, len(geometry) + 1), size=58, fontsize=6.4)
+        ax.set_xlabel(crs_note(framed), fontsize=8)
+        ax.set_ylabel("metres from SW corner", fontsize=8)
+        ax.tick_params(labelsize=7.5)
+        ax.set_title(
+            f"Field portfolio — {len(geometry)} fields, {total_acres:.0f} ac total", fontsize=10.5
+        )
+        ax.legend(
+            handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.13),
+            ncol=2 if len(handles) > 8 else 1, fontsize=6.6, frameon=False,
+            handletextpad=0.4, labelspacing=0.3, columnspacing=1.2,
+        )
+        fig.tight_layout()
+        _save(fig, png)
+        _write_portfolio_csv(csv, geometry, fields)
+        return
+
+    fig = plt.figure(figsize=(7.2, 10.2), dpi=180)
+    grid = fig.add_gridspec(
+        3, 1, height_ratios=[1.0, 2.25, 0.55], hspace=0.34,
+    )
+    ax = fig.add_subplot(grid[0])
+    detail_ax = fig.add_subplot(grid[1])
+    key_ax = fig.add_subplot(grid[2])
+    key_ax.axis("off")
+
+    _fill_field_polygons(ax, geometry, crops, alpha=0.7, linewidth=0.8)
     ax.set_xlim(x_min, x_max)
     ax.set_ylim(y_min, y_max)
     ax.set_aspect("equal", adjustable="box")
-    decorate(ax, framed, callout=False)
-    ax.set_xlabel(crs_note(framed), fontsize=8)
-    ax.set_ylabel("metres from SW corner", fontsize=8)
-    ax.tick_params(labelsize=7.5)
-    ax.set_title(
-        f"Field portfolio — {len(geometry)} fields, "
-        f"{float(pd.to_numeric(fields['area_acres'], errors='coerce').sum()):.0f} ac total",
-        fontsize=10.5,
+    decorate(ax, framed, callout=False, arrow_xy=(0.87, 0.78))
+    # Mark the detail extent; everything inside it is numbered in the panel
+    # below, so the overview only numbers fields outside the box. Numbering a
+    # field twice, once at full extent and once enlarged, reads as two fields.
+    pad = 0.06 * max(cx1 - cx0, cy1 - cy0)
+
+    def _inside_detail(geom) -> bool:
+        point = geom.representative_point()
+        return (cx0 - pad <= point.x <= cx1 + pad
+                and cy0 - pad <= point.y <= cy1 + pad)
+
+    visible = [
+        i for i in range(len(geometry)) if not _inside_detail(geometry.iloc[i])
+    ]
+    _number_fields(
+        ax, geometry.iloc[visible], [index + 1 for index in visible],
+        size=42, fontsize=5.8, rings=(4.0, 7.0),
     )
-    ax.legend(handles=handles, loc="upper left", bbox_to_anchor=(1.01, 1.0),
-              fontsize=7.2, frameon=False, handletextpad=0.6, labelspacing=0.75)
-    fig.tight_layout()
+    rect = plt.Rectangle(
+        (cx0 - pad, cy0 - pad), (cx1 - cx0) + 2 * pad, (cy1 - cy0) + 2 * pad,
+        fill=False, edgecolor="#111827", linewidth=1.1, linestyle=(0, (4, 3)), zorder=7,
+    )
+    ax.add_patch(rect)
+    ax.annotate(
+        "detail below", (cx1 + pad, cy0 - pad), xytext=(-3, 3), textcoords="offset points",
+        ha="right", va="bottom", fontsize=6.6, color="#111827", zorder=8,
+        bbox=dict(boxstyle="round,pad=0.18", fc="white", ec="none", alpha=0.85),
+    )
+    ax.set_xlabel(crs_note(framed), fontsize=7.5)
+    ax.set_ylabel("metres from SW corner", fontsize=7.5)
+    ax.tick_params(labelsize=7)
+    # Left-align the title: the north-arrow box sits at the right of the
+    # overview panel and a centred title runs underneath it.
+    ax.set_title(
+        f"Portfolio overview — {len(geometry)} fields · {total_acres:.0f} ac",
+        fontsize=9.8, loc="left",
+    )
+
+    _fill_field_polygons(detail_ax, geometry, crops, alpha=0.7, linewidth=0.9)
+    detail_ax.set_xlim(cx0 - pad, cx1 + pad)
+    detail_ax.set_ylim(cy0 - pad, cy1 + pad)
+    detail_ax.set_aspect("equal", adjustable="box")
+    decorate(detail_ax, framed, callout=False, arrow_xy=(0.13, 0.80))
+    _number_fields(detail_ax, geometry, range(1, len(geometry) + 1), size=52, fontsize=6.0)
+    detail_ax.set_xlabel("metres from SW corner (same frame)", fontsize=7.5)
+    detail_ax.set_ylabel("metres from SW corner", fontsize=7.5)
+    detail_ax.tick_params(labelsize=7)
+    detail_ax.set_title(
+        f"Detail — largest contiguous cluster ({len(cluster)} fields)", fontsize=9.5
+    )
+
+    crop_handles = [
+        plt.Line2D([], [], marker="s", linestyle="", markersize=7,
+                   markerfacecolor=_crop_color(crop), markeredgecolor="#111827", label=crop)
+        for crop in sorted(set(crops))
+    ]
+    crop_key = key_ax.legend(
+        handles=crop_handles, loc="upper left", fontsize=6.4, frameon=False,
+        ncol=len(crop_handles), handletextpad=0.4, labelspacing=0.3,
+        borderaxespad=0.0,
+    )
+    key_ax.add_artist(crop_key)
+    key_ax.legend(
+        handles=handles, loc="upper left", bbox_to_anchor=(0.0, 0.82), ncol=3,
+        fontsize=5.6, frameon=False, handletextpad=0.35, labelspacing=0.28,
+        columnspacing=0.9, borderaxespad=0.0, title="Field key", title_fontsize=6.4,
+    )
+
     _save(fig, png)
+    _write_portfolio_csv(csv, geometry, fields)
+
+
+def _write_portfolio_csv(csv: Path, geometry, fields: gpd.GeoDataFrame) -> None:
     _write_csv(
         pd.DataFrame(
             {
@@ -625,8 +861,13 @@ def plot_cdl_crop_matrix(dominant: pd.DataFrame, png: Path, csv: Path) -> None:
                    markerfacecolor=_crop_color(c), markeredgecolor="white", label=c)
         for c in crops
     ]
-    ax.legend(handles=handles, loc="upper center", bbox_to_anchor=(0.5, -0.16),
-              ncol=min(len(crops), 4), fontsize=7.5, frameon=False)
+    # Anchor in points, not axes fraction: with 40 rows the axes is ~17 in tall
+    # and a -0.16 fraction would drop the key 2.7 in below the x label.
+    ax.legend(
+        handles=handles, loc="upper center", bbox_to_anchor=(0.5, 0),
+        bbox_transform=offset_copy(ax.transAxes, fig=fig, y=-42, units="points"),
+        ncol=min(len(crops), 4), fontsize=7.5, frameon=False,
+    )
     fig.tight_layout()
     _save(fig, png)
 
@@ -666,7 +907,9 @@ def plot_cdl_purity(dominant: pd.DataFrame, png: Path, csv: Path) -> None:
                        markerfacecolor=_crop_color(c), markeredgecolor="#1f1f1f", label=c)
             for c in sorted(dominant["dominant_crop"].unique())
         ],
-        loc="lower left", fontsize=7.2, frameon=False, title="Dominant class",
+        loc="upper center", bbox_to_anchor=(0.5, 0),
+        bbox_transform=offset_copy(ax.transAxes, fig=fig, y=-42, units="points"),
+        ncol=4, fontsize=7.2, frameon=False, title="Dominant class",
         title_fontsize=7.2,
     )
     fig.tight_layout()

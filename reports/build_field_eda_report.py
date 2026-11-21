@@ -27,7 +27,6 @@ from PIL import Image
 
 MAX_WIDTH = 1200
 FIGURE_WIDTHS = {
-    "boundaries_adjacency.png": 900,
     "weather_variance.png": 900,
 }
 
@@ -120,6 +119,65 @@ def build(root: Path, grower: str, farm: str) -> str:
     cdl_years = f"{cdl['years'][0]}–{cdl['years'][-1]}"
     weather_years = f"{int(precip.index.min())}–{int(precip.index.max())}"
     multipart_ids = ", ".join(area[area["part_count"] > 1]["field_id"])
+    field_years = len(purity)
+    pair_count = field_count * (field_count - 1) // 2
+
+    adjacency = pd.read_csv(root / "boundaries_adjacency.csv")
+    touching = adjacency.loc[adjacency["shared_edge_m"] > 0].sort_values(
+        "shared_edge_m", ascending=False
+    )
+    touching_text = ", ".join(
+        f"<code>{row.field_a}</code>/<code>{row.field_b}</code> ({row.shared_edge_m:.1f} m)"
+        for row in touching.itertuples()
+    )
+    nearest_non_touch = adjacency.loc[adjacency["shared_edge_m"] == 0].nsmallest(1, "gap_m").iloc[0]
+    near_pairs = int((adjacency["gap_m"] <= 250).sum())
+    close_pairs = int((adjacency["gap_m"] < 50).sum())
+    overlap_pairs = int((adjacency["overlap_acres"] > 0.01).sum())
+    max_overlap = float(adjacency["overlap_acres"].max())
+    max_gap_km = float(adjacency["gap_m"].max()) / 1000
+
+    wide = purity.pivot(index="field_id", columns="year", values="dominant_crop")
+    continuous_corn = sorted(wide.index[(wide == "Corn").all(axis=1)])
+    continuous_text = ", ".join(f"<code>{field}</code>" for field in continuous_corn) or "none"
+    shape_extreme = area.sort_values(
+        ["part_count", "compactness"], ascending=[False, True]
+    ).iloc[0]
+
+    gdd_fields = sorted(gdd["field_id"].unique())
+    gdd_label = ", ".join(f"<code>{field}</code>" for field in gdd_fields)
+
+    planted_path = summary.get("inputs", {}).get("planted")
+    planted_manifest = (
+        json.loads(Path(planted_path).read_text(encoding="utf-8")) if planted_path else {}
+    )
+    manifest_fields = planted_manifest.get("fields", [])
+    slugless = sum(1 for entry in manifest_fields if not entry.get("field_slug"))
+    planted_resolved = int(rotation["planted"].notna().sum())
+
+    weather_cells = int(weather.get("distinct_weather_cells", 1))
+    grower_count = len(weather.get("growers_available", [grower]))
+
+    monthly = precip.stack()
+    wet_year, wet_month = monthly.idxmax()
+    dry_year, dry_month = monthly.idxmin()
+    wet_value = float(monthly.max())
+    dry_value = float(monthly.min())
+    month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun",
+                   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+    wet_label = f"{month_names[int(wet_month) - 1]} {int(wet_year)}"
+    dry_label = f"{month_names[int(dry_month) - 1]} {int(dry_year)}"
+
+    weather_coverage = (
+        f"{weather_years} on {weather_cells} gridded cell"
+        + ("s" if weather_cells != 1 else "")
+    )
+    planted_coverage = (
+        f"{planted_resolved} fields resolved"
+        + (f" ({slugless} by name fallback)" if slugless else "")
+    )
+    boundary_coverage = f"{field_count} fields, 2026"
+    cdl_coverage = f"{field_count} fields × {len(cdl['years'])} years ({field_years} field-years)"
 
     css = """
 :root { color-scheme: light; }
@@ -167,39 +225,44 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid #d7d4cb; fon
             "boundaries_area_ratio.png",
             f"<strong>Area vs. acreage token in the field name.</strong> Each bar is measured geometry area as a "
             "percentage of the number embedded in the field name. The dashed line is 100 %; red marks more than "
-            f"15 % off. Nine fields sit at {ratio_inlier_min:.0f}–{ratio_inlier_max:.0f} %; only "
-            f"<code>{off_name.iloc[0].field_id}</code> is far out at {off_name.iloc[0].ratio_to_name_pct:.0f} %. "
-            "Field names are labels, not survey measurements, so this is a naming/geometry consistency check "
-            "rather than an error budget.",
+            f"15 % off. {len(inliers)} of the {len(area)} fields with a numeric acreage token sit at "
+            f"{ratio_inlier_min:.0f}–{ratio_inlier_max:.0f} %; "
+            f"{len(off_name)} are further out, led by <code>{off_name.iloc[0].field_id}</code> at "
+            f"{off_name.iloc[0].ratio_to_name_pct:.0f} %. Field names are labels, not survey measurements, so "
+            "this is a naming/geometry consistency check rather than an error budget.",
         ),
         (
             "boundaries_shape.png",
             "<strong>Boundary shape quality.</strong> Polsby–Popper compactness (1.0 = circle) against polygon part "
             "count; bubble area scales with acres and colour is the 2026 planted crop. Single-part fields cluster "
-            "near the top-left. The multipart fields are less compact, and <code>17ac-iwillis</code> is the extreme "
-            "case: four parts and compactness 0.14.",
+            f"near the top-left. {multipart} of {field_count} boundaries are multipart; the extreme case is "
+            f"<code>{shape_extreme.field_id}</code> at {int(shape_extreme.part_count)} parts and compactness "
+            f"{shape_extreme.compactness:.2f}. Labels use leader lines where the points are packed.",
         ),
         (
             "boundaries_adjacency.png",
-            "<strong>Field separation (comparison).</strong> Edge-to-edge gap in metres for every field pair, with "
-            "shared-edge length in the CSV. Only <code>23ac-north-brady</code> and <code>33ac-south</code> actually "
-            "touch (4.54 m shared edge, 0.4 m gap). The next closest pair is <code>12ac-flot</code> and "
-            "<code>21ac-clay-7</code> at 42 m. No pair overlaps.",
+            "<strong>Field separation (comparison).</strong> Edge-to-edge gap for every field pair; the full "
+            f"{pair_count}-pair table is in the CSV and the figure shows the {near_pairs} pairs within 250 m. "
+            f"{len(touching)} pairs share a boundary: {touching_text}. The closest pair that does not touch is "
+            f"<code>{nearest_non_touch.field_a}</code>/<code>{nearest_non_touch.field_b}</code> at "
+            f"{nearest_non_touch.gap_m:.1f} m. {close_pairs} pairs are within 50 m; the farthest pair is "
+            f"{max_gap_km:.1f} km apart. {overlap_pairs} overlap is a {max_overlap:.3f} ac sliver on a shared edge.",
         ),
         (
             "cdl_crop_matrix.png",
-            "<strong>CDL dominant class by field and year.</strong> One cell per field-year for 10 fields × 5 CDL "
-            "years. Eight fields alternate Corn and Soybeans. <code>12ac-flot</code> is continuous corn, and "
-            "<code>17ac-iwillis</code> carries a 2024 Grass/Pasture break.",
+            "<strong>CDL dominant class by field and year.</strong> One cell per field-year for "
+            f"{field_count} fields × {len(cdl['years'])} CDL years. {cdl['alternating_fields']} fields alternate "
+            f"Corn and Soybeans; continuous corn: {continuous_text}. Grass/Pasture and Winter Wheat appear as "
+            "breaks in a few otherwise row-consistent sequences.",
         ),
         (
             "cdl_purity.png",
             f"<strong>CDL class purity per field-year.</strong> Each dot is one year's share of the dominant CDL "
             f"class inside the field boundary; the red line marks 70 %. The median is {median_purity:.1f} %, so most "
-            "field-years are cleanly one crop. Three low-purity cases are visible: <code>17ac-iwillis</code> in "
-            "2024 (24.6 %, "
-            "Grass/Pasture), 2021 (53.6 %) and <code>12ac-kev</code> in 2023 (57.7 %). Low purity can mean a real "
-            "mixed year, a boundary that clips neighbouring land, or both.",
+            f"field-years are cleanly one crop. {len(low_purity)} of {field_years} field-years fall below 70 %; the "
+            f"lowest is <code>{low_purity.iloc[0].field_id}</code> in {int(low_purity.iloc[0].year)} at "
+            f"{low_purity.iloc[0].dominant_pct:.1f} % ({low_purity.iloc[0].dominant_crop}). Low purity can mean a "
+            "real mixed year, a boundary that clips neighbouring land, or both.",
         ),
         (
             "cdl_rotation.png",
@@ -211,37 +274,40 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid #d7d4cb; fon
         (
             "weather_gdd_curves.png",
             f"<strong>Cumulative growing degree days.</strong> Season-to-date GDD (°F, base 50, cap 86) from 1 April "
-            f"to 31 October for <code>10ac-m-d</code>, one line per year. The {gdd_low_year} season finishes lowest "
+            f"to 31 October for {gdd_label}, one line per year. The {gdd_low_year} season finishes lowest "
             f"at {gdd_min:,.0f} °F and {gdd_high_year} highest at {gdd_max:,.0f} °F; the spread is about "
             f"{(gdd_max - gdd_min) / gdd_max * 100:.0f} % of the seasonal total.",
         ),
         (
             "weather_precip_heatmap.png",
-            f"<strong>Monthly precipitation.</strong> One field's monthly totals for {weather_years}, in millimetres, "
-            "because every field samples the same weather cell. Season totals range from "
-            f"{precip_min:,.0f} mm ({precip_min_year}) to {precip_max:,.0f} mm ({precip_max_year}). June 2021 is the "
-            "wettest month at 218 mm; February 2024 is the driest at 7 mm.",
+            f"<strong>Monthly precipitation.</strong> One field's monthly totals for {weather_years}, in millimetres; "
+            f"the farm resolves to {weather_cells} nearby grid cell{'s' if weather_cells != 1 else ''}. Season "
+            f"totals range from {precip_min:,.0f} mm ({precip_min_year}) to {precip_max:,.0f} mm "
+            f"({precip_max_year}). The wettest month is {wet_label} at {wet_value:,.0f} mm; the driest is "
+            f"{dry_label} at {dry_value:,.0f} mm.",
         ),
         (
             "weather_variance.png",
             f"<strong>Weather variance partition (comparison).</strong> Season-total GDD is split into field, year, "
-            f"and residual terms. Year explains {variance_share.get('year', 0):.0f} % of the variance. The field term "
-            f"is {variance_share.get('field', 0):.0f} % <em>by construction</em> because all ten fields share one "
-            "weather series, not because fields were shown to be identical. The grower term is skipped: only one "
-            "grower is in scope.",
+            f"and residual terms. Year explains {variance_share.get('year', 0):.1f} % of the variance. The field term "
+            f"is {variance_share.get('field', 0):.2f} %: the farm resolves to {weather_cells} nearby grid "
+            f"cell{'s' if weather_cells != 1 else ''}, so this is a data-structure result, not evidence that fields "
+            "are agronomically identical. The grower term is skipped because only one grower is in scope.",
         ),
         (
             "boundaries_portfolio_map.png",
-            f"<strong>Field portfolio map.</strong> All ten fields in local metres (UTM zone 15N, EPSG:32615), with "
-            "north arrow and numbered labels keyed to the legend. Colour is the 2026 planted crop and the legend "
-            f"gives acres. The portfolio spans roughly {span_ew_km:.1f} km east–west and {span_ns_km:.1f} km "
-            "north–south and forms several clusters rather than one contiguous block.",
+            f"<strong>Field portfolio map.</strong> All {field_count} fields in local metres (UTM zone 15N, "
+            "EPSG:32615) with a north arrow. The overview keeps the full extent; the dashed box is expanded into a "
+            "detail panel that numbers the largest contiguous cluster, and the key gives field ID and acres. "
+            "Colour is the 2026 planted crop. The portfolio spans roughly "
+            f"{span_ew_km:.1f} km east–west and {span_ns_km:.1f} km north–south and forms several clusters rather "
+            "than one contiguous block.",
         ),
     ]
 
     figures_html = []
     for name, caption in figures:
-        max_width = 900 if name in {"boundaries_adjacency.png", "weather_variance.png"} else None
+        max_width = 900 if name == "weather_variance.png" else None
         figures_html.append(figure(root / name, caption, max_width=max_width))
     figures_html = "\n".join(figures_html)
 
@@ -260,7 +326,7 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid #d7d4cb; fon
   <h1>Field-level EDA: Hibler Farms</h1>
   <p class="lede">A field, field-year and within-grower look at the derived field boundaries, CDL crop history,
   and gridded weather for one Missouri farm, built from the reusable <code>eda-field</code> subskill's
-  ten figures and ten CSV tables.</p>
+  {len(figures)} figures and {len(figures)} CSV tables.</p>
   <p class="meta">Grower <strong>Hibler Farms</strong> (<code>{html.escape(grower)}</code>) ·
   farm <code>{html.escape(farm)}</code> · run generated {generated:%Y-%m-%d %H:%M} UTC ·
   this file is committed; the runtime artifacts are not.</p>
@@ -269,16 +335,16 @@ footer { margin-top: 46px; padding-top: 16px; border-top: 1px solid #d7d4cb; fon
     <li>{total_acres:.1f} derived acres</li>
     <li>{cdl_years} CDL</li>
     <li>{weather_years} weather</li>
-    <li>1 grower</li>
+    <li>{grower_count} grower{'s' if grower_count != 1 else ''}</li>
   </ul>
 </header>
 
 <section id="scope">
 <h2>1. Dataset scope and grower location</h2>
 <p>The farm is in west-central Missouri, at roughly <strong>39.03° N, 94.04° W</strong> — about 30 miles east of
-Kansas City. The ten field centroids sit within a few kilometres of each other, so the portfolio is one local
-neighbourhood rather than a multi-county operation. All spatial work is done in local metres (UTM zone 15N) to
-avoid degree-based distance errors.</p>
+Kansas City. The {field_count} field centroids span roughly {span_ew_km:.0f} km east–west and
+{span_ns_km:.0f} km north–south: one local neighbourhood with several separated clusters, not a multi-county
+operation. All spatial work is done in local metres (UTM zone 15N) to avoid degree-based distance errors.</p>
 <p>The data are a single farm snapshot, not a longitudinal farm business record. The boundary layer describes
 <strong>2026</strong> as-applied coverage; CDL gives the preceding five years of land cover; weather gives the same
 five seasons. There is no yield, soil-test, machine-log, or management-record layer in this run.</p>
@@ -288,13 +354,13 @@ five seasons. There is no yield, soil-test, machine-log, or management-record la
     ["Layer", "Source in this run", "What it contributes", "Coverage"],
     [
         ["Field boundaries", "AgFiniti as-applied point buffers, 30 ft swath, unioned by field",
-         "Field footprint, acres, shape, multipart structure, adjacency", "10 fields, 2026"],
+         "Field footprint, acres, shape, multipart structure, adjacency", boundary_coverage],
         ["CDL composition", "USDA Cropland Data Layer, summarised to class shares inside each boundary",
-         "Dominant crop class and class purity per field-year", "10 fields × 5 years (50 field-years)"],
+         "Dominant crop class and class purity per field-year", cdl_coverage],
         ["Weather", "NASA POWER daily reanalysis, aggregated to season GDD and monthly precipitation",
-         "Cumulative GDD curves, monthly precipitation, variance partition", "5 seasons (2021–2025) on one gridded cell"],
+         "Cumulative GDD curves, monthly precipitation, variance partition", weather_coverage],
         ["Planted record", "AgFiniti derived-field provenance manifest (crop + operation)",
-         "2026 planted crop for the rotation outcome check", "10 fields after name fallback"],
+         "2026 planted crop for the rotation outcome check", planted_coverage],
     ],
 )}
 <p class="meta">Boundaries are derived, not surveyed: the manifest warns that headlands not covered by as-applied
@@ -308,11 +374,11 @@ points are excluded and that a few percent area difference from nominal acreage 
     ["Level", "What is compared", "Status in this run"],
     [
         ["Within field over time", "CDL class and purity 2021–2025; cumulative GDD by season",
-         "Used for all 10 fields"],
+         f"Used for all {field_count} fields"],
         ["Across fields", "Area, shape, compactness, adjacency, 2026 crop",
-         "Used for all 10 fields (45 field pairs)"],
+         f"Used for all {field_count} fields ({pair_count} field pairs)"],
         ["Field-year", "Dominant class, purity, season-total GDD, rotation outcome",
-         f"Used: {len(purity)} CDL and {weather['field_years']} weather field-years"],
+         f"Used: {field_years} CDL and {weather['field_years']} weather field-years"],
         ["Grower", "One grower's fields aggregated", "Used (single group)"],
         ["Across growers", "Field vs. year vs. grower variance shares",
          "Not identified: only one grower exists, so the grower term is skipped rather than reported as zero"],
@@ -334,26 +400,27 @@ matching CSV in the runtime artifact folder.</p>
 <ul class="tight">
   <li><strong>Rotation consistency.</strong> {cdl['flips_to_2026']} of {cdl['comparable_2026']} fields flip crop
   between the last CDL year and the 2026 planted record; {cdl['repeats_to_2026']} repeat. A two-sided binomial
-  test gives p = {cdl['flip_binomial_p']:.4f}. With n = 10 this is a structural check, not evidence that the
-  grower deliberately rotates.</li>
+  test gives p = {cdl['flip_binomial_p']:.4f}. With n = {cdl['comparable_2026']} comparable fields this is a
+  structural check, not evidence that the grower deliberately rotates.</li>
   <li><strong>CDL purity vs. field area.</strong> Spearman ρ = {cdl['purity_vs_log_area_spearman']:.3f}
-  (p = {cdl['purity_vs_log_area_p']:.4f}) between dominant-class share and log area. There is no detectable
-  monotonic relationship: small and large fields both reach high purity. The low-purity cases are specific
-  field-years, not a size effect.</li>
-  <li><strong>Name token vs. measured area.</strong> Nine of ten fields are within 15 % of the acreage number in
-  their name (range {ratio_inlier_min:.1f}–{ratio_inlier_max:.1f} %). The exception is {off_name_text}. The name is a label;
-  the derived geometry is the measurement.</li>
+  (p = {cdl['purity_vs_log_area_p']:.4f}) between dominant-class share and log area. The relationship is weak:
+  small and large fields both reach high purity, and the low-purity cases are specific field-years rather than a
+  size effect.</li>
+  <li><strong>Name token vs. measured area.</strong> {len(inliers)} of the {len(area)} fields with a numeric
+  acreage token are within 15 % of it (range {ratio_inlier_min:.1f}–{ratio_inlier_max:.1f} %). The exceptions are
+  {off_name_text}. The name is a label; the derived geometry is the measurement.</li>
   <li><strong>Shape and fragmentation.</strong> {multipart} of {field_count} boundaries are multipart
-  ({multipart_ids}). Multipart fields have lower compactness, and <code>17ac-iwillis</code> is the outlier at
-  0.14 compactness with four parts.</li>
-  <li><strong>Adjacency.</strong> One pair touches (<code>23ac-north-brady</code> / <code>33ac-south</code>,
-  {boundaries['findings']['max_shared_edge_m']:.2f} m shared edge) and one pair is close but separate
-  (<code>12ac-flot</code> / <code>21ac-clay-7</code>, 42 m). The remaining pairs are hundreds to thousands of
-  metres apart, and there are no overlaps.</li>
+  ({multipart_ids}). Multipart fields have lower compactness; <code>{shape_extreme.field_id}</code> is the
+  extreme case at {shape_extreme.compactness:.2f} compactness with {int(shape_extreme.part_count)} parts.</li>
+  <li><strong>Adjacency.</strong> {len(touching)} pairs share a boundary ({touching_text}); the closest pair that
+  does not touch is <code>{nearest_non_touch.field_a}</code>/<code>{nearest_non_touch.field_b}</code> at
+  {nearest_non_touch.gap_m:.1f} m. {close_pairs} pairs sit within 50 m and {near_pairs} within 250 m, so the farm
+  is several tight clusters rather than one block. The full table spans up to {max_gap_km:.1f} km; one pair has a
+  {max_overlap:.3f} ac sliver overlap, a boundary artefact rather than a duplicated field.</li>
   <li><strong>Weather variance.</strong> Season-total GDD varies far more by year than by field: year explains
-  {variance_share.get('year', 0):.0f} % of the variance, field {variance_share.get('field', 0):.0f} % by
-  construction, and the residual {variance_share.get('residual (interaction)', 0):.0f} %. This is a
-  data-structure result, not an agronomic finding.</li>
+  {variance_share.get('year', 0):.1f} % of the variance, field {variance_share.get('field', 0):.2f} %, and the
+  residual {variance_share.get('residual (interaction)', 0):.2f} %. The field term reflects the
+  {weather_cells} nearby grid cells, not an agronomic contrast.</li>
 </ul>
 
 <h3>Rotation detail</h3>
@@ -363,18 +430,20 @@ the 2025 CDL class; “repeat” means it matches. A CDL year is a land-cover ob
 
 <h3>Low-purity field-years</h3>
 {table(["Field", "Year", "Dominant CDL class", "Share"], low_purity_rows)}
-<p class="meta">Median purity across all 50 field-years is {median_purity:.1f} %. These three cases fall below the
-70 % reference line; they are the main places where a single dominant-class label hides a mixed or edge-affected
-footprint.</p>
+<p class="meta">Median purity across all {field_years} field-years is {median_purity:.1f} %. These
+{len(low_purity)} cases fall below the 70 % reference line; they are the places where a single dominant-class
+label hides a mixed or edge-affected footprint.</p>
 </section>
 
 <section id="map">
 <h2>5. What the geospatial map shows</h2>
-<p>The portfolio map is the only map in this run. It places all ten derived boundaries on one local-metre frame
-with a north arrow, numbers each field, colours by 2026 crop, and repeats acres in the legend. It shows that the
-farm is a set of separated clusters, that five fields are multipart, and that only one pair is physically
-adjacent. A CDL raster map was not produced because the run ingests the CDL composition table, not the source
-raster; the map therefore carries crop as a field-level attribute rather than a per-pixel layer.</p>
+<p>The portfolio map is the only map in this run. It places all {field_count} derived boundaries on one
+local-metre frame with a north arrow, numbers each field, colours by 2026 crop, and gives ID and acres in the
+key. The overview keeps the true extent; the detail panel expands the largest contiguous cluster so the dense
+core stays legible. It shows that the farm is a set of separated clusters, that {multipart} fields are multipart,
+and that {len(touching)} pairs share a boundary. A CDL raster map was not produced because the run ingests the
+CDL composition table, not the source raster; the map therefore carries crop as a field-level attribute rather
+than a per-pixel layer.</p>
 </section>
 
 <section id="limits">
@@ -382,9 +451,10 @@ raster; the map therefore carries crop as a field-level attribute rather than a 
 <ul class="tight">
   <li><strong>One grower only.</strong> Across-grower comparison is not identified. The variance partition skips
   the grower term and says so, instead of presenting a zero as evidence.</li>
-  <li><strong>One weather series.</strong> All ten fields resolve to the same gridded weather cell (the tables
-  store field centroids, but the daily values are identical). Field-level weather replication is therefore not
-  identified; the field share of GDD variance is 0 % by construction.</li>
+  <li><strong>Few weather series.</strong> All {field_count} fields resolve to {weather_cells} gridded weather
+  cell{'s' if weather_cells != 1 else ''} (the tables store field centroids, but fields in the same cell share
+  identical daily values). Field-level weather replication is therefore weak or absent; the field share of GDD
+  variance is {variance_share.get('field', 0):.2f} %.</li>
   <li><strong>Derived boundaries.</strong> Footprints come from buffered as-applied points, not survey or platform
   exports. Headlands can be missing, and area can differ from nominal acres by a few percent. Shape metrics
   describe the derived polygon, not the legal field.</li>
@@ -393,13 +463,13 @@ raster; the map therefore carries crop as a field-level attribute rather than a 
   <li><strong>CDL is coarse land cover.</strong> A 30 m raster summarised inside a field boundary mixes edge
   pixels, strips, and neighbouring land. Low purity is ambiguous between a real mixed year and boundary
   contamination. CDL is also not a management record and does not prove what was planted.</li>
-  <li><strong>Short panel, small n.</strong> Five CDL years and fifty field-years support description and
-  structural checks, not causal inference. The rotation binomial p-value and the purity correlation are reported
-  as diagnostics; neither is treated as agronomic evidence.</li>
-  <li><strong>Planted-record fallback.</strong> Six of ten manifest entries had no <code>field_slug</code>.
-  Those fields were resolved by a unique normalized <code>field_name</code> match against the boundary table, and
-  a Planting record outranks a Grain Harvest record for the same field. All ten fields resolved; no field was
-  left as “no planted record”.</li>
+  <li><strong>Short panel, small n.</strong> {len(cdl['years'])} CDL years and {field_years} field-years support
+  description and structural checks, not causal inference. The rotation binomial p-value and the purity
+  correlation are reported as diagnostics; neither is treated as agronomic evidence.</li>
+  <li><strong>Planted-record fallback.</strong> {slugless} of {len(manifest_fields)} manifest entries had no
+  <code>field_slug</code>. Those fields were resolved by a unique normalized <code>field_name</code> match
+  against the boundary table, and a Planting record outranks a Grain Harvest record for the same field.
+  {planted_resolved} fields resolved; no field was left as “no planted record”.</li>
   <li><strong>Not in scope.</strong> No yield, irrigation, fertility, pest, economics, or soil-moisture layer.
   Weather is gridded reanalysis, not an on-farm station.</li>
 </ul>
@@ -423,7 +493,7 @@ committed. To regenerate:</p>
 python reports/build_field_eda_report.py \\
   --data-root ~/my-farm-advisor-runtime \\
   --grower-slug {html.escape(grower)} --farm-slug {html.escape(farm)}</pre>
-<p>The run writes ten PNG figures, ten CSV tables, and <code>run_summary.json</code> under
+<p>The run writes {len(figures)} PNG figures, {len(figures)} CSV tables, and <code>run_summary.json</code> under
 <code>derived/analysis/eda-field/</code>. The CSVs are the source of every number in this HTML; the images are
 inlined here so the committed file opens on its own.</p>
 {table(

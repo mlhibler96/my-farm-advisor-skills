@@ -96,8 +96,8 @@ A run also writes `run_summary.json` with the findings and guard notes.
 |---|---|---|
 | `boundaries_area_ratio.png` | Does the measured acreage match the token in the field name? | One flagged bar means the name lies; the geometry is still the truth. |
 | `boundaries_shape.png` | Is a field a clean parcel or a fragmented/sliver footprint? | Multipart or low-compactness fields distort every per-pixel share, so their CDL purity needs a caveat. |
-| `boundaries_adjacency.png` | Are these independent fields or contiguous blocks? | Zeros and small gaps mean shared edges; large gaps mean the portfolio is a set of distant parcels, not one block. |
-| `boundaries_portfolio_map.png` | Where is the portfolio, at true relative position? | Numbered footprints on local metre axes; the key carries ID, acreage, and planted crop. |
+| `boundaries_adjacency.png` | Are these independent fields or contiguous blocks? | The closest pairs are shown as gap lollipops (red where an edge is shared); the full pair table is in the CSV. Small gaps mean one block, large gaps a set of distant parcels. |
+| `boundaries_portfolio_map.png` | Where is the portfolio, at true relative position? | Numbered footprints on local metre axes; a detail panel expands the largest contiguous cluster and the key carries ID, acreage, and planted crop. |
 
 ### CDL
 
