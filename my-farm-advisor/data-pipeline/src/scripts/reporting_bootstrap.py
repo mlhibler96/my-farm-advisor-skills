@@ -7,6 +7,7 @@ import os
 import sys
 from pathlib import Path
 
+from lib.farm_metadata import infer_farm_state
 from lib.runtime_paths import resolve_runtime_paths
 
 
@@ -148,6 +149,16 @@ def field_slug_map_from_inventory(inventory_path: Path | None = None) -> dict[st
             continue
         mapping[parts[0].strip()] = parts[1].strip()
     return mapping
+
+
+def _load_json(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _write_json(path: Path, payload: dict, *, overwrite: bool = True) -> None:
@@ -406,13 +417,18 @@ def ensure_canonical_data_tree(
     (farm / "derived" / "summaries").mkdir(parents=True, exist_ok=True)
     (farm / "derived" / "dashboards").mkdir(parents=True, exist_ok=True)
     (farm / "derived" / "tables").mkdir(parents=True, exist_ok=True)
+    farm_meta = _load_json(farm / "farm.json")
+    state_code = infer_farm_state(
+        farm / "boundary" / "field_boundaries.geojson",
+        prior_state=str(farm_meta.get("state") or ""),
+    )
     _write_json(
         farm / "farm.json",
         {
             "grower_slug": grower_slug,
             "farm_slug": farm_slug,
             "display_name": farm_name,
-            "state": "IA",
+            "state": state_code,
             "country": "US",
             "default_crs": "EPSG:4326",
             "notes": "Canonical farm metadata",

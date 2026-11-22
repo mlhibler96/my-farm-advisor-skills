@@ -111,8 +111,43 @@ def _fig_to_b64(fig) -> str:
     return base64.b64encode(buf.read()).decode("utf-8")
 
 
-def _img_to_b64(img_path: Path) -> str:
-    """Convert image file to base64 string."""
+_EMBED_MAX_PX = 1200
+
+
+def _img_to_b64(img_path: Path, max_px: int = _EMBED_MAX_PX) -> str:
+    """Convert image file to a base64 string for inline embedding.
+
+    Large assets are downscaled and palette-quantised first. The field posters
+    are 4000+ px wide, so embedding three posters plus nine soil maps per field
+    at full resolution produced a 114 MB HTML file that browsers struggle to
+    open. A 256-colour palette PNG cuts that roughly tenfold while staying a
+    genuine PNG, so the ``data:image/png`` mime type on every call site remains
+    correct. The on-disk file keeps its full resolution; only this inline copy
+    is capped.
+    """
+    try:
+        from PIL import Image
+
+        with Image.open(img_path) as image:
+            if max(image.size) > max_px:
+                ratio = max_px / max(image.size)
+                resized = image.resize(
+                    (max(1, int(image.width * ratio)), max(1, int(image.height * ratio))),
+                    Image.LANCZOS,
+                )
+                # FASTOCTREE is the only quantiser that preserves per-pixel
+                # transparency, which the matplotlib RGBA exports rely on.
+                if resized.mode in ("RGBA", "LA", "P"):
+                    quantised = resized.convert("RGBA").quantize(
+                        colors=256, method=Image.FASTOCTREE
+                    )
+                else:
+                    quantised = resized.convert("RGB").quantize(colors=256)
+                buffer = io.BytesIO()
+                quantised.save(buffer, format="PNG", optimize=True)
+                return base64.b64encode(buffer.getvalue()).decode("utf-8")
+    except Exception:  # noqa: BLE001 - fall back to the original bytes
+        pass
     with open(img_path, "rb") as f:
         return base64.b64encode(f.read()).decode("utf-8")
 
@@ -538,7 +573,7 @@ def _field_card(
 <div id="{modal_id}" class="modal">
   <div class="modal-content">
     <a href="#{field_anchor}" class="modal-close">&times; Close</a>
-    <h2>Field {fid[-8:]} — {card_label}</h2>
+    <h2>Field {fid} — {card_label}</h2>
     <img src="data:image/png;base64,{b64_data}" style="width:100%;max-width:1200px;" alt="{card_label}">
   </div>
 </div>
@@ -556,7 +591,7 @@ def _field_card(
 
     return f"""
 <section class="field-card" id="{field_anchor}">
-  <h2>Field {fid[-8:]} <span class="badge">{acres:.1f} ac</span></h2>
+  <h2>Field {fid} <span class="badge">{acres:.1f} ac</span></h2>
 
   <div class="poster-preview">
     <h3>Field Poster</h3>
@@ -615,7 +650,7 @@ def _field_card(
 <div id="poster-modal-{idx}" class="modal">
   <div class="modal-content">
     <a href="#{field_anchor}" class="modal-close">&times; Close</a>
-    <h2>Field {fid[-8:]} Poster</h2>
+    <h2>Field {fid} Poster</h2>
     <img src="data:image/png;base64,{poster_b64}" style="width:100%;max-width:1200px;" alt="Full field poster">
   </div>
 </div>
@@ -740,7 +775,7 @@ def main() -> None:
     for idx_num in range(len(fields)):
         frow = fields.iloc[idx_num]
         fid = frow["field_id"]
-        print(f"    Loading poster for field {fid[-6:]}...")
+        print(f"    Loading poster for field {fid}...")
         field_slug = field_slug_lookup.get(str(fid))
         poster_path = (
             field_report_path(
@@ -770,7 +805,7 @@ def main() -> None:
         )
 
     nav = " | ".join(
-        f'<a href="#field-{str(r["field_id"])[-6:]}">{str(r["field_id"])[-6:]}</a>'
+        f'<a href="#field-{str(r["field_id"])[-6:]}">{str(r["field_id"])}</a>'
         for _, r in fields.iterrows()
     )
 

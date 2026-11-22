@@ -550,6 +550,20 @@ geneticist — gets both without us choosing their agent harness for them.
 | Weather | [`weather/INDEX.md`](my-farm-advisor/weather/INDEX.md) | NASA POWER weather and derived analysis |
 | Data pipeline | [`data-pipeline/README.md`](my-farm-advisor/data-pipeline/README.md) | Country-aware ingest, per-field rendering, runtime management |
 
+#### Custom EDA subskill: `eda-field`
+
+[`eda-field`](my-farm-advisor/eda/eda-field/GUIDE.md) is the field-level EDA
+subskill in the My Farm Advisor EDA tree, routed from
+[`eda/INDEX.md`](my-farm-advisor/eda/INDEX.md). It reads derived field
+boundaries, CDL composition, gridded weather, and the planted manifest, then
+compares at field, field-year, and grower levels, with the across-grower level
+guarded when only one grower exists. Each run writes ten PNG figures, their ten
+CSV tables, and `run_summary.json` under
+`$DATA_PIPELINE_DATA_ROOT/data-pipeline/growers/<grower>/farms/<farm>/derived/analysis/eda-field/`;
+runtime outputs stay out of Git. A one-time self-contained HTML report from the
+Hibler Farms run is committed at
+[`reports/field-eda-hibler-farms.html`](reports/field-eda-hibler-farms.html).
+
 ### 🌱 My Farm Breeding Trial Management
 
 | Area | Examples of work |

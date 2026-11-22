@@ -82,12 +82,13 @@ def _ranking_bars(ax, field_df, metric_col, title):
         ax.set_visible(False)
         return
     df = field_df[["field_id", metric_col]].dropna().sort_values(metric_col)
-    labels = [str(f)[-6:] for f in df["field_id"]]
+    labels = [str(f) for f in df["field_id"]]
     values = df[metric_col].astype(float).tolist()
     y = np.arange(len(labels))
     ax.barh(y, values, color="#3b82f6", edgecolor="white", height=0.65)
     ax.set_yticks(y)
-    ax.set_yticklabels(labels, fontsize=7)
+    ax.set_yticklabels(labels, fontsize=8)
+    ax.tick_params(axis="y", length=0)
     ax.set_title(title, fontsize=10, fontweight="bold", loc="left")
     ax.grid(True, axis="x", alpha=0.3)
 
@@ -153,11 +154,13 @@ def _spotlight_field_slug(fields: gpd.GeoDataFrame) -> tuple[str | None, str | N
 
 
 def _image_panel(ax, path: Path | None, title: str, note: str | None = None) -> None:
-    ax.set_title(title, fontsize=9.5, fontweight="bold", loc="left")
     if path is not None and path.exists():
+        # Cached NDVI cards already carry their own heading; drawing the panel
+        # title as well produced two overlapping titles.
         ax.imshow(mpimg.imread(path))
         ax.axis("off")
         return
+    ax.set_title(title, fontsize=9.5, fontweight="bold", loc="left")
     ax.set_axis_off()
     ax.text(
         0.5,
@@ -287,37 +290,65 @@ def main() -> None:
         fontfamily="serif",
     )
     gs = fig.add_gridspec(
-        6, 4, hspace=0.40, wspace=0.28, left=0.04, right=0.97, top=0.975, bottom=0.015
+        6, 4, hspace=0.40, wspace=0.28, left=0.055, right=0.97, top=0.975, bottom=0.015
     )
 
     ax_map = fig.add_subplot(gs[0, 0:2])
-    fields.boundary.plot(ax=ax_map, color="darkgreen", linewidth=1.5)
-    projected_fields = fields.to_crs("EPSG:5070") if fields.crs else fields
-    centroids = gpd.GeoSeries(
-        projected_fields.geometry.centroid, crs=projected_fields.crs
-    ).to_crs(fields.crs or "EPSG:4326")
+    # Web Mercator plus an Esri basemap: without imagery the portfolio map was
+    # a few green outlines floating in an empty white panel.
+    map_crs = "EPSG:3857"
+    map_frame = fields.to_crs(map_crs) if fields.crs else fields
+    minx, miny, maxx, maxy = map_frame.total_bounds
+    pad_x = (maxx - minx) * 0.08 + 400.0
+    pad_y = (maxy - miny) * 0.08 + 400.0
+    ax_map.set_xlim(minx - pad_x, maxx + pad_x)
+    ax_map.set_ylim(miny - pad_y, maxy + pad_y)
+    basemap_ready = False
+    try:
+        import contextily as cx
+
+        cx.add_basemap(
+            ax_map,
+            source=cx.providers.Esri.WorldImagery,
+            crs=map_crs,
+            zoom=13,
+            # The provider's full credit string is sized for a 12-inch figure
+            # and swamped the field labels on this poster panel.
+            attribution="Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics",
+        )
+        basemap_ready = True
+    except Exception as exc:  # noqa: BLE001 - poster must still render offline
+        print(f"  basemap unavailable: {exc}")
+    map_frame.boundary.plot(ax=ax_map, color="#ffd400", linewidth=1.8, zorder=3)
+    centroids = map_frame.geometry.centroid
     sz = (
         fields["area_acres"].fillna(30).astype(float) * 6
         if "area_acres" in fields.columns
         else 100
     )
-    ax_map.scatter(centroids.x, centroids.y, s=sz, color="#2563eb", alpha=0.7, zorder=5)
-    for _, frow in fields.iterrows():
-        c = (
-            gpd.GeoSeries([frow.geometry], crs=fields.crs or "EPSG:4326")
-            .to_crs("EPSG:5070")
-            .centroid.to_crs(fields.crs or "EPSG:4326")
-            .iloc[0]
-        )
+    ax_map.scatter(centroids.x, centroids.y, s=sz, color="#2563eb", alpha=0.75, zorder=5)
+    for (_, frow), centroid in zip(map_frame.iterrows(), centroids):
+        # White label text on light imagery was unreadable; a dark plate keeps
+        # the field ids legible at poster viewing size.
         ax_map.annotate(
-            str(frow["field_id"])[-5:],
-            (c.x, c.y),
-            fontsize=7,
+            str(frow["field_id"]),
+            (centroid.x, centroid.y),
+            xytext=(0, 14),
+            textcoords="offset points",
+            fontsize=11,
             ha="center",
             color="white",
             fontweight="bold",
-            zorder=6,
+            zorder=7,
+            bbox={
+                "boxstyle": "round,pad=0.3",
+                "facecolor": "#0f172a",
+                "edgecolor": "none",
+                "alpha": 0.85,
+            },
         )
+    if not basemap_ready:
+        ax_map.set_facecolor("#f8fafc")
     ax_map.set_title("Farm field map", fontsize=11, fontweight="bold", loc="left")
     ax_map.set_axis_off()
 
@@ -368,7 +399,7 @@ def main() -> None:
     _ranking_bars(fig.add_subplot(gs[1, 3]), field_df, "headlands_pct", "Headlands (%)")
 
     spotlight_title = (
-        f"Remote sensing spotlight — {field_id[-6:]}"
+        f"Remote sensing spotlight — {field_id}"
         if field_id and spotlight_slug
         else "Remote sensing spotlight"
     )

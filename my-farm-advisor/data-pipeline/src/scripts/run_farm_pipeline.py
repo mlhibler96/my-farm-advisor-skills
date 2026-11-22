@@ -213,6 +213,15 @@ def main() -> None:
         help="DEM terrain context buffer in meters for explicit terrain runs",
     )
     parser.add_argument(
+        "--cdl-years",
+        default=None,
+        help=(
+            "Comma-separated CDL crop-history years for the farm analysis "
+            "(e.g. 2021,2022,2023,2024,2025). Defaults to the program "
+            "publication-lag window ending at the latest published year."
+        ),
+    )
+    parser.add_argument(
         "--dem-source-policy",
         choices=[
             "auto",
@@ -299,6 +308,7 @@ def main() -> None:
         "--source-policy",
         args.dem_source_policy,
     )
+    cdl_command_args = ("--cdl-years", args.cdl_years) if args.cdl_years else ()
     steps = [
         ("ingest/download_fields.py", "Canonical field boundaries", (), False),
         (
@@ -310,7 +320,7 @@ def main() -> None:
         ("ingest/download_soil.py", "Field soil tables (SSURGO / Ontario survey / Australia SLGA-ASF routing)", (), False),
         ("ingest/download_soilgrids.py", "SoilGrids 250 m global grid clips + field stats", (), False),
         ("ingest/download_weather.py", "Weather history tables", (), False),
-        ("ingest/download_cdl.py", "Shared CDL/ACI history tables", (), False),
+        ("ingest/download_cdl.py", "Shared CDL/ACI history tables", cdl_command_args, False),
         ("ingest/download_satellite_imagery.py", "Raw satellite TIFFs", (), False),
         ("reporting/generate_ndvi_composites.py", "NDVI yearly composites", (), False),
         ("reporting/generate_ndvi_cards.py", "NDVI cached cards", (), False),

@@ -229,13 +229,15 @@ def _soil_attributes_by_mukey(detail_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _ndvi_panel(ax, image_path: Path | None, title: str) -> None:
-    ax.set_title(
-        title, fontsize=_PANEL_TITLE_SIZE, fontweight="bold", loc="left", pad=8
-    )
     if image_path is not None and image_path.exists():
+        # The cached card already renders its own heading and caption, so the
+        # panel must not draw a second title on top of it.
         ax.imshow(mpimg.imread(image_path))
         ax.axis("off")
         return
+    ax.set_title(
+        title, fontsize=_PANEL_TITLE_SIZE, fontweight="bold", loc="left", pad=8
+    )
     ax.axis("off")
     ax.text(
         0.5,
@@ -397,14 +399,49 @@ def _ranking_card(ax, field_reporting_df, field_id):
 
 
 def _soil_map_panel(ax, image_path: Path | None, title: str, fallback_render) -> None:
-    ax.set_title(
-        title, fontsize=_PANEL_TITLE_SIZE, fontweight="bold", loc="left", pad=8
-    )
     if image_path is not None and image_path.exists():
+        # Cached SSURGO maps carry their own bold title; a panel title here
+        # used to overlap it.
         ax.imshow(mpimg.imread(image_path))
         ax.axis("off")
         return
+    # The fallback renderer draws its own title from the property label, so the
+    # panel must not add a second one on top.
     fallback_render(ax)
+
+
+def _display_field_label(field_row, field_id: str) -> str:
+    """Human label for the poster header.
+
+    Prefers the boundary's own ``field_name`` (AgFiniti/CLU exports carry one),
+    otherwise de-slugs the field id. Previously the header kept only the last
+    eight characters, which turned ``50ac-bttms`` into ``ac-bttms``.
+    """
+    name = field_row.get("field_name") if hasattr(field_row, "get") else None
+    if isinstance(name, str) and name.strip():
+        return name.strip()
+    return str(field_id).replace("-", " ").replace("_", " ").strip()
+
+
+def _crop_region_label(field_gdf) -> str:
+    """Coarse US corn-belt region from the field centroid latitude.
+
+    Replaces a hardcoded "Iowa Corn Belt" caption that labelled every farm in
+    every state as Iowa.
+    """
+    try:
+        wgs84 = field_gdf.to_crs("EPSG:4326") if field_gdf.crs else field_gdf
+        lat = float(wgs84.geometry.centroid.iloc[0].y)
+    except Exception:  # noqa: BLE001 - a caption must never fail a render
+        return "Corn Belt"
+    for threshold, label in (
+        (46.0, "Northern Corn Belt"),
+        (41.0, "Corn Belt"),
+        (37.0, "Corn Belt South"),
+    ):
+        if lat >= threshold:
+            return label
+    return "Southern Corn Belt"
 
 
 def _render_field_poster(
@@ -445,7 +482,9 @@ def _render_field_poster(
     fig = plt.figure(figsize=(28, 36))
     fig.patch.set_facecolor("#fafaf9")
     fig.suptitle(
-        f"Field Intelligence Report — {field_id[-8:]}  ·  {float(field_row.get('area_acres', 0)):.1f} ac  ·  Iowa Corn Belt",
+        f"Field Intelligence Report — {_display_field_label(field_row, field_id)}"
+        f"  ·  {float(field_row.get('area_acres', 0)):.1f} ac"
+        f"  ·  {_crop_region_label(field_gdf)}",
         fontsize=_POSTER_TITLE_SIZE,
         fontweight="bold",
         y=0.993,
@@ -453,7 +492,7 @@ def _render_field_poster(
         fontfamily="serif",
     )
     gs = fig.add_gridspec(
-        6, 4, hspace=0.42, wspace=0.28, left=0.04, right=0.97, top=0.975, bottom=0.015
+        6, 4, hspace=0.42, wspace=0.28, left=0.065, right=0.97, top=0.975, bottom=0.015
     )
 
     ndvi_assets = _cached_ndvi_assets(field_slug)

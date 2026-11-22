@@ -21,16 +21,31 @@ def prepare_weather_reporting(
 
 
 def summarize_weather_variability(weather: pd.DataFrame) -> pd.DataFrame:
+    """Per-field weather summary.
+
+    ``annual_precip_mm`` is a TRUE annual figure: daily totals are summed
+    within each year and averaged across the years present. Summing the whole
+    multi-year record (the previous behaviour) reported a five-year total as
+    "annual", inflating precipitation by the length of the window.
+    """
     df = prepare_weather_reporting(weather)
     grouped = df.groupby("field_id")
-    return grouped.agg(
+    summary = grouped.agg(
         avg_temp_c=("T2M", "mean"),
         avg_precip_mm=("PRECTOTCORR", "mean"),
-        annual_precip_mm=("PRECTOTCORR", "sum"),
         avg_gdd=("gdd", "mean"),
         max_gdd_cumulative=("gdd_cumulative", "max"),
         years=("year", "nunique"),
     ).reset_index()
+    annual = (
+        df.groupby(["field_id", "year"])["PRECTOTCORR"]
+        .sum()
+        .groupby("field_id")
+        .mean()
+        .rename("annual_precip_mm")
+        .reset_index()
+    )
+    return summary.merge(annual, on="field_id", how="left")
 
 
 def _frost_markers(df: pd.DataFrame) -> tuple[float | None, float | None]:

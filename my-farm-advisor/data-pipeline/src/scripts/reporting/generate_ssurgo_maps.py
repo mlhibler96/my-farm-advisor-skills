@@ -47,6 +47,73 @@ from reporting_bootstrap import field_slug_map_from_inventory
 _DEFAULT_GROWER = os.environ.get("AG_GROWER_SLUG", "default-grower")
 _DEFAULT_FARM = os.environ.get("AG_FARM_SLUG", "default-farm")
 
+# One attribute row per MUKEY, collapsed from the horizon-level SSURGO detail
+# table. Cached survey polygons carry geometry + MUKEY only.
+_SSURGO_ATTR_AGG = {
+    "compname": "first",
+    "comppct_r": "first",
+    "drainagecl": "first",
+    "om_r": "mean",
+    "ph1to1h2o_r": "mean",
+    "awc_r": "mean",
+    "claytotal_r": "mean",
+    "sandtotal_r": "mean",
+    "silttotal_r": "mean",
+    "dbthirdbar_r": "mean",
+    "cec7_r": "mean",
+}
+_SSURGO_NUMERIC_ATTRS = [
+    "comppct_r",
+    "om_r",
+    "ph1to1h2o_r",
+    "awc_r",
+    "claytotal_r",
+    "sandtotal_r",
+    "silttotal_r",
+    "dbthirdbar_r",
+    "cec7_r",
+]
+
+
+def _attributes_by_mukey(detail_df: pd.DataFrame) -> pd.DataFrame:
+    """Collapse horizon-level SSURGO rows to one attribute row per MUKEY."""
+    if detail_df.empty or "mukey" not in detail_df.columns:
+        return pd.DataFrame()
+    spec = {col: how for col, how in _SSURGO_ATTR_AGG.items() if col in detail_df.columns}
+    if not spec:
+        return pd.DataFrame()
+    soil = detail_df[["mukey", *spec]].copy()
+    soil["mukey"] = soil["mukey"].astype(str)
+    for col in _SSURGO_NUMERIC_ATTRS:
+        if col in soil.columns:
+            soil[col] = pd.to_numeric(soil[col], errors="coerce")
+    return pd.DataFrame(soil.groupby("mukey", as_index=False).agg(spec))
+
+
+def _attach_soil_attributes(
+    field_ssurgo: gpd.GeoDataFrame, detail_df: pd.DataFrame
+) -> gpd.GeoDataFrame:
+    """Join per-MUKEY soil attributes onto cached survey polygons.
+
+    Without this join every property map in this script found no attribute
+    column, dropped every polygon, and reported "Property maps saved: 0".
+    """
+    if field_ssurgo.empty or "mukey" not in field_ssurgo.columns:
+        return field_ssurgo
+    attributes = _attributes_by_mukey(detail_df)
+    if attributes.empty:
+        return field_ssurgo
+    frame = field_ssurgo.copy()
+    frame["mukey"] = frame["mukey"].astype(str)
+    duplicate = [
+        col for col in attributes.columns if col != "mukey" and col in frame.columns
+    ]
+    if duplicate:
+        frame = frame.drop(columns=duplicate)
+    merged = frame.merge(attributes, on="mukey", how="left")
+    return gpd.GeoDataFrame(merged, geometry="geometry", crs=field_ssurgo.crs)
+
+
 PROPERTY_SPECS = [
     ("comppct_r", "Dominant Component", "%", "component_pct"),
     ("om_r", "Organic Matter", "%", "organic_matter"),
@@ -370,7 +437,15 @@ def _add_basemap(ax, field_gdf: gpd.GeoDataFrame, zoom: int = 14):
 
         esri = getattr(ctx.providers, "Esri")
         imagery = getattr(esri, "WorldImagery")
-        ctx.add_basemap(ax, crs=field_gdf.crs, source=imagery, alpha=0.5)
+        # A short credit: the default full provider string wraps to two lines
+        # and collided with the legend in the lower-right corner.
+        ctx.add_basemap(
+            ax,
+            crs=field_gdf.crs,
+            source=imagery,
+            alpha=0.5,
+            attribution="Tiles © Esri — Source: Esri, Maxar, Earthstar Geographics",
+        )
         return True
     except Exception as e:
         print(f"    Basemap error: {e}")
@@ -452,7 +527,7 @@ def _render_map(
             )
         ax.legend(
             handles=legend_elements,
-            loc="lower right",
+            loc="upper left",
             fontsize=7,
             framealpha=0.92,
             title=legend_title,
@@ -498,7 +573,9 @@ def render_ssurgo_component_map(
     if not plot_source.empty:
         plot_source["class_id"] = np.arange(len(plot_source))
 
-    field_short = field_id[-6:] if field_id else "Field"
+    # Never tail-truncate the id: "50ac-bttms" became "bttms" and every map
+    # title read as if it belonged to a different field.
+    field_short = str(field_id) if field_id else "Field"
     mukey_count = int(plot_source["mukey"].nunique()) if not plot_source.empty else 0
 
     def _label(part: gpd.GeoDataFrame) -> str:
@@ -537,14 +614,17 @@ def render_ssurgo_property_map(
         return False
     class_ids, labels = _classify_quantiles(pd.Series(plot_source[property_col]), class_count=4)
     plot_source["class_id"] = class_ids
-    field_short = field_id[-6:] if field_id else "Field"
+    # Never tail-truncate the id: "50ac-bttms" became "bttms" and every map
+    # title read as if it belonged to a different field.
+    field_short = str(field_id) if field_id else "Field"
     mukey_count = int(plot_source["mukey"].nunique()) if "mukey" in plot_source.columns else 0
 
     def _label(part: gpd.GeoDataFrame) -> str:
         idx = int(part.iloc[0]["class_id"])
-        mukeys = ", ".join(part["mukey"].astype(str).tolist()[:4])
-        suffix = f" | MUKEY {mukeys}" if mukeys else ""
-        return f"{property_label} {labels[idx]}{suffix}"
+        # The MUKEY list used to be appended here; with three or four MUKKEYs
+        # the legend ran past the figure edge and its text was cut off. The
+        # title already reports the MUKEY count, so keep labels short.
+        return f"{labels[idx]}"
 
     legend_title = (
         f"{property_label} ({property_units}) Classes"
@@ -576,13 +656,20 @@ def main() -> None:
     field_slug_map = field_slug_map_from_inventory()
     print(f"Loaded {len(fields)} fields")
 
+    soil_full = pd.DataFrame()
+    detail_path = farm_ssurgo_full_path(_DEFAULT_GROWER, _DEFAULT_FARM)
+    if detail_path.exists():
+        soil_full = pd.read_csv(detail_path)
+    else:
+        print(f"  warning: SSURGO detail table not found at {detail_path}")
+
     for idx, field_row in enumerate(fields.itertuples(index=False), start=1):
         field_id = str(getattr(field_row, "field_id", f"field_{idx}"))
         field_slug = field_slug_map.get(field_id)
         if not field_slug:
             print(f"  skip {field_id} (no field slug)")
             continue
-        field_short = field_id[-8:] if len(field_id) > 8 else field_id
+        field_short = str(field_id)
 
         print(f"\nProcessing field: {field_short}")
 
@@ -596,6 +683,13 @@ def main() -> None:
             field_ssurgo = gpd.read_file(cached)
         else:
             field_ssurgo = get_ssurgo_polygons_with_soil_data(field_single, field_id)
+
+        field_detail = (
+            soil_full.loc[soil_full["field_id"].astype(str) == field_id].copy()
+            if "field_id" in soil_full.columns
+            else pd.DataFrame()
+        )
+        field_ssurgo = _attach_soil_attributes(field_ssurgo, field_detail)
 
         component_output = field_feature_path(
             _DEFAULT_GROWER, _DEFAULT_FARM, field_slug, "soil_component_map.png"
